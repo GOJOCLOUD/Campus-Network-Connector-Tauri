@@ -515,7 +515,11 @@ fn build_mapping(entries: &HashMap<char, CharInfo>) -> HashMap<char, char> {
 }
 
 /// 对某个标签跑一轮：注入 → 取作用域 → 算映射 → 写回。
-pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> Result<usize, String> {
+pub fn check_tab(
+    app: &tauri::AppHandle,
+    window_index: u32,
+    tab_index: u32,
+) -> Result<(usize, bool), String> {
     let db = reference_db(app)?;
     let matcher = FastGlyphMatcher::new((*db).clone());
 
@@ -535,6 +539,12 @@ pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> R
             inject_count = *slot;
         }
     }
+    // **这个标签到底有没有被接管**（界面上的「已接管」靠它）。
+    //
+    // 以前的口径是"这一轮处理过至少一个标签" → 哪怕守卫一次都没装上也显示"已接管",
+    // 用户看到的是"绿色的问号 + 已接管",却什么也没发生(2026-10-22 的真故障)。
+    // 现在必须**确实有守卫在场**(本来就在,或这一轮注入成功)。
+    let mut guard_ok = guard_present;
     if !guard_present || inject_count % FORCE_INJECT_EVERY == 0 {
         // 注入超时不当作硬错误:Apple Event 是在等页面里的 JS 返回,
         // 页面忙的时候它会超时,但**守卫其实已经装上了**。当错误抛出去的话,
@@ -544,13 +554,15 @@ pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> R
         // **但别的错必须透出**:当初注入脚本是语法错误(守卫源码没转义)时,
         // 错误被 `let _ =` 吞掉 —— 守卫一次都没装上,界面却一直显示"已开启",
         // 这个功能就这么"开着但不工作"了很久。注入失败必须能被看见。
-        if let Err(e) =
-            bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS, FRAME_BRIDGE_JS)
-        {
-            if e.contains("AppleScript 超时") {
-                // 页面忙,不算致命:下一轮就好。
-            } else {
-                return Err(format!("注入守卫失败: {}", e));
+        match bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS, FRAME_BRIDGE_JS) {
+            Ok(_) => guard_ok = true,
+            Err(e) => {
+                if e.contains("AppleScript 超时") {
+                    // 页面忙,不算致命:下一轮就好。
+                    // 但**不能**因此说"已接管"—— 守卫到底装上没有,只有页面知道。
+                } else {
+                    return Err(format!("注入守卫失败: {}", e));
+                }
             }
         }
     }
@@ -620,7 +632,7 @@ pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> R
             total += mapping.len();
         }
     }
-    Ok(total)
+    Ok((total, guard_ok))
 }
 
 /// 取一个上报项里的作用域组。
@@ -685,6 +697,8 @@ pub fn check_now(app: &tauri::AppHandle, round: u64) -> Result<serde_json::Value
     }
     let mut checked = 0usize;
     let mut mapped = 0usize;
+    /// 这一轮里**确实有守卫在场**的标签数（界面上的「已接管」靠它）。
+    let mut taken_over = 0usize;
     let mut errors: Vec<String> = Vec::new();
     // 要处理的标签:**目标站点的标签 + 前台标签**。
     // 前台标签每轮都处理(Electron 版同口径)——
@@ -707,7 +721,12 @@ pub fn check_now(app: &tauri::AppHandle, round: u64) -> Result<serde_json::Value
     for (w, t) in targets {
         checked += 1;
         match check_tab(app, w, t) {
-            Ok(n) => mapped += n,
+            Ok((n, guard_ok)) => {
+                mapped += n;
+                if guard_ok {
+                    taken_over += 1;
+                }
+            }
             Err(e) => {
                 // **单个标签的超时不算致命**:这一页可能正忙(Apple Event 等页面里的
                 // JS 返回),守卫其实已经装上了,下一轮就好。Electron 版也是这么
@@ -726,7 +745,9 @@ pub fn check_now(app: &tauri::AppHandle, round: u64) -> Result<serde_json::Value
         }
     }
     if let Ok(mut s) = state().lock() {
-        s.injected = checked > 0;
+        // **口径**:「已接管」= 这一轮**确实有标签的守卫在场**。
+        // 以前是"处理过至少一个标签" → 守卫一次都没装上也显示"已接管"。
+        s.injected = taken_over > 0;
         if errors.is_empty() {
             s.last_error.clear();
         } else {
