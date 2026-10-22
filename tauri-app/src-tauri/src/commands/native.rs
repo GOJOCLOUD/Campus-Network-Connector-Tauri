@@ -59,3 +59,27 @@ pub fn get_current_input_source() -> Result<String, String> {
 pub fn select_input_source(source_id: String) -> Result<bool, String> {
     imp::select_input_source(source_id)
 }
+
+// ── 剪贴板（macOS 专有：NSPasteboard）──────────────────────────
+
+/// 读剪贴板里的文本。
+///
+/// Electron 版用 Electron 的 clipboard API；Tauri 版没有内置剪贴板，
+/// 这里直接用 NSPasteboard（objc2-app-kit 已经有这个 feature）。
+#[tauri::command]
+pub fn clipboard_read_text() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+        let pb = NSPasteboard::generalPasteboard();
+        // NSPasteboardTypeString 是 extern static,取用要进 unsafe 块
+        let text = unsafe { pb.stringForType(NSPasteboardTypeString) }
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        Ok(text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("剪贴板读取目前只有 macOS 实现".to_string())
+    }
+}

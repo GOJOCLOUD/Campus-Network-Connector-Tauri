@@ -100,10 +100,10 @@ fn window_maximize(app: tauri::AppHandle) {
 /// Safari 复制修复 —— 只有 macOS 有(靠 Apple Events)。
 /// 命令照样注册,Windows 上明确报"不支持",而不是让前端报"命令不存在"。
 #[tauri::command]
-fn safari_repair_check_now() -> Result<serde_json::Value, String> {
+fn safari_repair_check_now(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "macos")]
     {
-        safari::repair::check_now()
+        safari::repair::check_now(&app)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -173,6 +173,7 @@ pub fn run() {
             nativecmd::send_key,
             nativecmd::get_current_input_source,
             nativecmd::select_input_source,
+            nativecmd::clipboard_read_text,
             safari_repair_check_now,
             safari_repair_set_enabled,
             safari_repair_get_status,
@@ -181,7 +182,7 @@ pub fn run() {
             // Safari 修复轮询只跟 macOS 有关(靠 osascript 驱动 Safari)
             #[cfg(target_os = "macos")]
             {
-                safari::repair::spawn_poller();
+                safari::repair::spawn_poller(app.handle().clone());
                 // 恢复上次的开关状态(Electron 版也是落盘的,重启后仍保持开启)
                 if appcmd::feature_enabled(app.handle(), "safari-repair") {
                     safari::repair::set_enabled(true);

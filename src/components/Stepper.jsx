@@ -83,7 +83,7 @@ export default function Stepper({
         ) : null}
         <div
           className={`${stepContainerClassName} app-drag flex w-full items-center p-8`}
-          data-app-drag-region="deep"
+          data-tauri-drag-region="deep"
         >
           {stepsArray.map((_, index) => {
             const stepNumber = index + 1;
@@ -126,7 +126,7 @@ export default function Stepper({
         </StepContentWrapper>
 
         {!isCompleted && (
-          <div className={`app-nodrag px-8 pb-8 ${footerClassName}`} data-app-drag-region="false">
+          <div className={`app-nodrag px-8 pb-8 ${footerClassName}`} data-tauri-drag-region="false">
             <div className={`mt-10 flex ${currentStep !== 1 ? 'justify-between' : 'justify-end'}`}>
               {currentStep !== 1 && (
                 <button
@@ -251,7 +251,7 @@ function StepIndicator({ step, currentStep, onClickStep, disableStepIndicators =
     <motion.div
       onClick={handleClick}
       className="app-nodrag relative cursor-pointer outline-none focus:outline-none"
-      data-app-drag-region="false"
+      data-tauri-drag-region="false"
       animate={status}
       initial={false}
     >

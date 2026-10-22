@@ -17,6 +17,9 @@ const path = require('path');
 
 let tmpSeq = 0;
 
+/** "Safari 在不在"的缓存时长(ms)：够挡住高频轮询，又不至于反应太慢 */
+const RUNNING_CACHE_MS = 1200;
+
 /** 把 JS 源码里的非 ASCII 字符转成 \uXXXX 转义（保证注入内容是纯 ASCII）。 */
 function toAsciiJs(source) {
   // eslint-disable-next-line no-control-regex -- 非 ASCII 转义,控制字符范围是故意的
@@ -64,12 +67,36 @@ function runJsIn(target, js, { timeout = 5000 } = {}) {
 class SafariBridge {
   constructor({ log } = {}) {
     this.log = log || (() => {});
+    /** @type {{at:number, value:boolean}|null} */
+    this._runningCache = null;
   }
 
+  /**
+   * Safari 在不在运行。
+   *
+   * 这一问必须走 System Events：**任何 `tell application "Safari"` 在 Safari
+   * 没运行时都会把它启动起来** —— 而我们要的是"Safari 在跑就生效"，
+   * 不是"帮用户把 Safari 拉起来"。
+   *
+   * 结果缓存一小会儿：主轮询 300ms 一轮、每次问一遍会多出每秒好几个
+   * osascript 进程，白白拖慢整机。
+   */
   isRunning() {
+    const now = Date.now();
+    if (this._runningCache && now - this._runningCache.at < RUNNING_CACHE_MS) {
+      return Promise.resolve(this._runningCache.value);
+    }
     return osaAsync('tell application "System Events" to (name of processes) contains "Safari"', { timeout: 3000 })
-      .then((out) => out === 'true')
-      .catch(() => false);
+      .then((out) => {
+        const value = out === 'true';
+        this._runningCache = { at: now, value };
+        return value;
+      })
+      .catch(() => {
+        // 问不到（没权限）不等于没运行 → 按"在跑"处理，让上层去报真正的错误
+        this._runningCache = { at: now, value: true };
+        return true;
+      });
   }
 
   isFrontmost() {

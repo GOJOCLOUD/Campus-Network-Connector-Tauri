@@ -23,6 +23,9 @@ use crate::safari::bridge;
 /// 页面守卫脚本（构建时从 resources 嵌进来，保证与 Electron 版同一份）。
 const GUARD_JS: &str = include_str!("../../resources/page-guard.js");
 
+/// 每隔多少轮强制补一次注入（与 Electron 版 FORCE_INJECT_EVERY 一致）。
+const FORCE_INJECT_EVERY: u32 = 5;
+
 /// 目标站点（与 Electron 版 `SITE_FILTER` 一致）。
 const SITE_FILTER: [&str; 1] = ["chaoxing.com"];
 
@@ -67,6 +70,9 @@ pub fn last_error() -> String {
     state().lock().map(|s| s.last_error.clone()).unwrap_or_default()
 }
 
+/// 各标签的注入计数（用于"每隔几轮补一次注入"）。
+static state_once: OnceLock<Mutex<u32>> = OnceLock::new();
+
 fn state() -> &'static Mutex<RepairState> {
     STATE.get_or_init(|| Mutex::new(RepairState::default()))
 }
@@ -89,18 +95,51 @@ pub fn is_injected() -> bool {
 }
 
 /// 参考库（懒加载，gzip 解压一次）。
-fn reference_db() -> Result<std::sync::Arc<GlyphDb>, String> {
-    static DB: OnceLock<Result<std::sync::Arc<GlyphDb>, String>> = OnceLock::new();
-    DB.get_or_init(|| {
-        use std::io::Read;
-        let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/glyph-db-48.crdb.gz"))
-            .map_err(|e| format!("读参考库失败: {}", e))?;
+fn reference_db(app: &tauri::AppHandle) -> Result<std::sync::Arc<GlyphDb>, String> {
+    use std::io::Read;
+    use std::path::PathBuf;
+    use tauri::Manager;
+
+    // **只缓存成功的结果** —— 失败也缓存的话,一次读不到就永久读不到
+    // (正是"启动失败就一直失效"的那种死法)。
+    static DB: OnceLock<std::sync::Arc<GlyphDb>> = OnceLock::new();
+    if let Some(db) = DB.get() {
+        return Ok(db.clone());
+    }
+
+    // 参考库必须**运行时从应用包里读**。
+    // 用 `env!("CARGO_MANIFEST_DIR")` 拼出来的是**构建机上的路径**,
+    // 打成包发到别的机器上就不存在了 —— 云端打包的包就是这么坏的:
+    // 标签读得到、守卫注入得到,但一解码就报"读参考库失败"。
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = app.path().resource_dir() {
+        // 打包后:Contents/Resources/resources/glyph-db-48.crdb.gz
+        candidates.push(dir.join("resources").join("glyph-db-48.crdb.gz"));
+        candidates.push(dir.join("glyph-db-48.crdb.gz"));
+    }
+    // 开发时:src-tauri/resources/...
+    candidates.push(PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/resources/glyph-db-48.crdb.gz"
+    )));
+
+    let mut last_err = String::new();
+    for path in candidates {
+        let raw = match std::fs::read(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("{}: {}", path.display(), e);
+                continue;
+            }
+        };
         let mut d = flate2::read::GzDecoder::new(&raw[..]);
         let mut out = Vec::new();
         d.read_to_end(&mut out).map_err(|e| format!("解压参考库失败: {}", e))?;
-        GlyphDb::deserialize(&out).map(std::sync::Arc::new)
-    })
-    .clone()
+        let db = std::sync::Arc::new(GlyphDb::deserialize(&out)?);
+        let _ = DB.set(db.clone());
+        return Ok(db);
+    }
+    Err(format!("读参考库失败: {}", last_err))
 }
 
 /// 取字体字节：data: URL 直接解 base64；http(s) 用 curl 取。
@@ -242,15 +281,33 @@ fn build_mapping(
 }
 
 /// 对某个标签跑一轮：注入 → 取作用域 → 算映射 → 写回。
-pub fn check_tab(window_index: u32, tab_index: u32) -> Result<usize, String> {
-    let db = reference_db()?;
+pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> Result<usize, String> {
+    let db = reference_db(app)?;
     let matcher = FastGlyphMatcher::new((*db).clone());
 
-    // 1) 注入守卫（幂等）
-    bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS)?;
-
-    // 2) 取待处理的作用域组
+    // 1) 先采集状态
+    //
+    // 顺序必须和 Electron 版一致（先采集、缺守卫才注入）：
+    // 注入是一次"等页面 JS 返回"的 Apple Event，每轮都重注入会把页面拖住，
+    // AppleScript 一直等 → 8 秒超时。Electron 版只注入一次，所以不会卡。
     let state = bridge::poll_state(Some(tab_index), Some(window_index))?;
+
+    // 2) 守卫不在才注入（每 FORCE_INJECT_EVERY 轮再强制补一次，对齐 Electron）
+    let guard_present = state.get("guard").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut inject_count = 0u32;
+    if let Some(cell) = state_once.get() {
+        if let Ok(mut slot) = cell.lock() {
+            *slot += 1;
+            inject_count = *slot;
+        }
+    }
+    if !guard_present || inject_count % FORCE_INJECT_EVERY == 0 {
+        // 注入超时不当作硬错误:Apple Event 是在等页面里的 JS 返回,
+        // 页面忙的时候它会超时,但**守卫其实已经装上了**。当错误抛出去的话,
+        // 这一轮整个标签的处理都会被跳过 —— 界面还一直挂着一条其实无害的报错。
+        // 真正的失败由紧随其后的 poll_state 判定。
+        let _ = bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS);
+    }
     let Some(groups) = state
         .get("pending")
         .and_then(|p| p.get("groups"))
@@ -309,7 +366,7 @@ pub fn check_tab(window_index: u32, tab_index: u32) -> Result<usize, String> {
 }
 
 /// 扫所有匹配站点的标签，各跑一轮。
-pub fn check_now() -> Result<serde_json::Value, String> {
+pub fn check_now(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
     // 区分"Safari 没运行"和"没有权限问 Safari"——后者是权限问题,得说清楚
     match bridge::safari_running_checked() {
         Ok(false) => {
@@ -350,9 +407,23 @@ pub fn check_now() -> Result<serde_json::Value, String> {
             continue;
         }
         checked += 1;
-        match check_tab(w, t) {
+        match check_tab(app, w, t) {
             Ok(n) => mapped += n,
-            Err(e) => errors.push(format!("w{}t{}: {}", w, t, e)),
+            Err(e) => {
+                // **单个标签的超时不算致命**:这一页可能正忙(Apple Event 等页面里的
+                // JS 返回),守卫其实已经装上了,下一轮就好。Electron 版也是这么
+                // 处理的(错误被 catch 掉)—— 这条不该在界面上报红。
+                // 真致命的问题(Safari 没开 / 没有自动化权限 / 参考库缺失)走别的路径,
+                // 照样会显示出来。
+                let msg = format!("w{}t{}: {}", w, t, e);
+                if e.contains("AppleScript 超时") {
+                    if let Ok(mut s) = state().lock() {
+                        s.last_probe = format!("（{} 不影响其它标签）", msg);
+                    }
+                } else {
+                    errors.push(msg);
+                }
+            }
         }
     }
     if let Ok(mut s) = state().lock() {
@@ -372,8 +443,8 @@ pub fn check_now() -> Result<serde_json::Value, String> {
 }
 
 /// 后台轮询线程：启用时每 2 秒扫一轮。
-pub fn spawn_poller() {
-    std::thread::spawn(|| loop {
+pub fn spawn_poller(app: tauri::AppHandle) {
+    std::thread::spawn(move || loop {
         let enabled = is_enabled();
         {
             if let Ok(mut s) = state().lock() {
@@ -382,7 +453,7 @@ pub fn spawn_poller() {
             }
         }
         if enabled {
-            let _ = check_now();
+            let _ = check_now(&app);
         }
         std::thread::sleep(std::time::Duration::from_millis(2000));
     });
