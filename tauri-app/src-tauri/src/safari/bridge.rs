@@ -148,6 +148,33 @@ pub fn poll_state(tab_index: Option<u32>, window_index: Option<u32>) -> Result<s
     serde_json::from_str(&raw).map_err(|e| format!("解析 pollState 失败: {}", e))
 }
 
+/// 拼出「注入守卫 + 注入 iframe 桥」这一段脚本（**纯函数**，便于测试）。
+///
+/// ## 守卫源码必须先做 JSON 字符串编码，再嵌进 JS 字面量
+///
+/// 守卫源码里全是 `"` 和 `\`（它本身是一份 JS 文件）。
+/// 直接把它塞进 `{ guardSource: "..." }` 的字面量里，第一个引号就把字符串
+/// 提前闭合 —— **整段脚本变成 JavaScript 语法错误**，
+/// `do JavaScript` 整段失败，守卫一次都装不上。
+///
+/// 而这个错误当时是被 `let _ =` 吞掉的，界面只显示「已开启」，
+/// 表现就是"功能开着但什么也不发生"（真机实测：18 个标签一个都没装上守卫）。
+///
+/// Electron 版用的是 `JSON.stringify(...)`，这里用 serde_json 做**同一件事**
+/// —— 两边的注入脚本必须逐字同口径。
+pub fn build_inject_script(guard_js: &str, frame_bridge_js: &str) -> String {
+    // 先把非 ASCII 转成 \uXXXX（AppleScript 按本地编码解码，不能有非 ASCII），
+    // 再用 JSON 字符串编码转义引号/反斜杠 —— 顺序不能反。
+    let guard_literal = serde_json::to_string(&to_ascii_js(guard_js))
+        .unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "{}\n;\n{}\n;\ntry {{ window.__copyRepairInstallFrameBridge({{ guardSource: {} }}); }} catch (e) {{ window.__copyRepairInjectError = String(e); }}",
+        guard_js,
+        frame_bridge_js,
+        guard_literal
+    )
+}
+
 /// 注入页面守卫（幂等：守卫内部有哨兵，重复注入不会叠加监听器）。
 ///
 /// **同时注入 iframe 桥**（与 Electron 版 `bridge.injectGuard` 同口径）：
@@ -160,12 +187,7 @@ pub fn inject_guard(
     frame_bridge_js: &str,
 ) -> Result<String, String> {
     let t = target(tab_index, window_index);
-    let combined = format!(
-        "{}\n;\n{}\n;\ntry {{ window.__copyRepairInstallFrameBridge({{ guardSource: {} }}); }} catch (e) {{ window.__copyRepairInjectError = String(e); }}",
-        guard_js,
-        frame_bridge_js,
-        to_ascii_js(guard_js),
-    );
+    let combined = build_inject_script(guard_js, frame_bridge_js);
     run_js_in(&t, &combined)
 }
 
@@ -285,5 +307,138 @@ pub fn safari_running_checked() -> Result<bool, String> {
 /// Safari 是否在运行(拿不到就当没运行,只看"在不在"的地方用这个)。
 pub fn safari_running() -> bool {
     safari_running_checked().unwrap_or(false)
+}
+
+// ── 回归测试 ─────────────────────────────────────────
+//
+// 盯的是**注入脚本本身能不能被 JS 解析**。
+//
+// 真机故障:守卫源码被原样塞进 JS 字符串字面量,第一个引号就把字面量提前闭合,
+// 整段脚本变成语法错误 → `do JavaScript` 整段失败 → 守卫一次都装不上 →
+// 界面显示"已开启"却什么也不发生(而且错误当时还被吞掉了)。
+//
+// 这组测试就是"别再断第二次"的护栏。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 从脚本里把 `guardSource:` 后面的那个 JS 字符串字面量**完整抠出来**（含首尾引号）。
+    ///
+    /// 不能用 `rfind(" }")` 之类的办法 —— 守卫源码本身就含 ` }`，
+    /// 会抠到后面去。这里按"未被转义的引号才是结尾"来扫，和 JSON 的规则一致。
+    fn extract_guard_literal(script: &str) -> String {
+        let start = script
+            .find("guardSource: ")
+            .expect("脚本里必须有 guardSource:")
+            + "guardSource: ".len();
+        let bytes = script.as_bytes();
+        assert_eq!(bytes[start], b'"', "字面量必须以引号开头");
+        let mut i = start + 1;
+        let mut escaped = false;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                return script[start..=i].to_string();
+            }
+            i += 1;
+        }
+        panic!("字面量没有结束引号");
+    }
+
+    /// 注入脚本里的守卫源码必须是**合法字符串字面量**（能被 JSON 解析回来）。
+    ///
+    /// 这条等价于"嵌进 JS 里不会把语法搞崩"，因为 JSON 字符串就是合法 JS 字符串。
+    #[test]
+    fn 注入脚本里的守卫源码是合法字符串字面量() {
+        // 故意用带引号/反斜杠/中文的源码 —— 真实守卫文件就是这样的。
+        let guard = r#"var a = "x"; var b = 'y'; var c = "中文字符"; // 反斜杠 \ 和引号 \""#;
+        let script = build_inject_script(guard, "");
+        let literal = extract_guard_literal(&script);
+
+        let back: String = serde_json::from_str(&literal)
+            .unwrap_or_else(|e| panic!("守卫源码字面量必须是合法 JSON 字符串: {}", e));
+        assert_eq!(back, to_ascii_js(guard));
+    }
+
+    /// 真实守卫文件（仓库里那份）也必须过这一关。
+    ///
+    /// 用仓库里真实的那份，而不是造一个短的 —— 真实文件里才有大量引号。
+    #[test]
+    fn 真实守卫文件能拼出合法字面量() {
+        let guard = include_str!("../../resources/page-guard.js");
+        let frame = include_str!("../../resources/frame-bridge.js");
+        let script = build_inject_script(guard, frame);
+        let literal = extract_guard_literal(&script);
+
+        let back: String = serde_json::from_str(&literal)
+            .unwrap_or_else(|e| panic!("真实守卫源码的字面量必须是合法 JSON 字符串: {}", e));
+        assert_eq!(back, to_ascii_js(guard));
+
+        // 字面量里不能残留未转义的引号 —— 那正是当初把整段脚本搞崩的东西。
+        let inner = &literal[1..literal.len() - 1];
+        let mut escaped = false;
+        for ch in inner.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            assert_ne!(ch, '"', "守卫源码里的引号必须转义，否则整段脚本是语法错误");
+        }
+    }
+
+    /// 非 ASCII 必须已经被转成 \uXXXX（AppleScript 按本地编码解码，中文会变乱码）。
+    #[test]
+    fn 注入脚本里没有非ascii字符() {
+        let guard = "中文注释 with english";
+        let script = build_inject_script(guard, "");
+        // `run_js_in` 写临时文件前会对**整段脚本**做 to_ascii_js，
+        // 所以断言的是最终真正写出去的那一份。
+        assert!(to_ascii_js(&script).is_ascii(), "注入脚本必须是纯 ASCII");
+    }
+
+    /// **用真的 JS 解析器校验真实产物**（node 在就跑，不在就明说跳过）。
+    ///
+    /// 前面的测试只能证明"字面量是合法 JSON 字符串"，
+    /// 这一条直接把拼出来的整段脚本丢给 JS 引擎解析 ——
+    /// 当初那个把功能整个废掉的语法错误，就是这样才被抓住的。
+    #[test]
+    fn 真实注入脚本能被javascript解析() {
+        let node = match std::process::Command::new("node")
+            .arg("--version")
+            .output()
+        {
+            Ok(o) if o.status.success() => "node",
+            _ => {
+                eprintln!("[跳过] 这台机器上没有 node，无法用 JS 解析器校验注入脚本");
+                return;
+            }
+        };
+        let guard = include_str!("../../resources/page-guard.js");
+        let frame = include_str!("../../resources/frame-bridge.js");
+        let script = build_inject_script(guard, frame);
+
+        let path = std::env::temp_dir().join(format!("cnc-inject-check-{}.js", std::process::id()));
+        std::fs::write(&path, &script).expect("写临时文件失败");
+        let out = std::process::Command::new(node)
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("跑 node --check 失败");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "注入脚本必须是合法 JavaScript:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 

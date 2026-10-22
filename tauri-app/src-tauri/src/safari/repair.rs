@@ -60,6 +60,11 @@ struct RepairState {
     /// 界面用它显示"Safari 没开是中性状态"的提示 ——
     /// 问不到时按"在跑"处理(Electron 版同口径),免得误报。
     safari_running: Option<bool>,
+    /// 最近一次**映射没建起来**的原因(取字体失败 / 分析失败 / 映射为空)。
+    ///
+    /// 这些分支原本全是 `continue` —— 静默跳过,界面只看得到"已开启"。
+    /// 真出问题时(字体取不到、参考库不对)根本无从查起,必须把原因透出来。
+    last_mapping_note: String,
 }
 
 /// 轮询诊断信息(自检用)。
@@ -89,6 +94,21 @@ pub fn last_error() -> String {
 
 /// 各标签的注入计数（用于"每隔几轮补一次注入"）。
 static state_once: OnceLock<Mutex<u32>> = OnceLock::new();
+
+/// 记下最近一次「映射没建起来」的原因（诊断用）。
+pub fn set_mapping_note(note: &str) {
+    if let Ok(mut s) = state().lock() {
+        s.last_mapping_note = note.to_string();
+    }
+}
+
+/// 最近一次「映射没建起来」的原因（空串 = 上一次是好的）。
+pub fn mapping_note() -> String {
+    state()
+        .lock()
+        .map(|s| s.last_mapping_note.clone())
+        .unwrap_or_default()
+}
 
 fn state() -> &'static Mutex<RepairState> {
     STATE.get_or_init(|| Mutex::new(RepairState::default()))
@@ -520,7 +540,19 @@ pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> R
         // 页面忙的时候它会超时,但**守卫其实已经装上了**。当错误抛出去的话,
         // 这一轮整个标签的处理都会被跳过 —— 界面还一直挂着一条其实无害的报错。
         // 真正的失败由紧随其后的 poll_state 判定。
-        let _ = bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS, FRAME_BRIDGE_JS);
+        //
+        // **但别的错必须透出**:当初注入脚本是语法错误(守卫源码没转义)时,
+        // 错误被 `let _ =` 吞掉 —— 守卫一次都没装上,界面却一直显示"已开启",
+        // 这个功能就这么"开着但不工作"了很久。注入失败必须能被看见。
+        if let Err(e) =
+            bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS, FRAME_BRIDGE_JS)
+        {
+            if e.contains("AppleScript 超时") {
+                // 页面忙,不算致命:下一轮就好。
+            } else {
+                return Err(format!("注入守卫失败: {}", e));
+            }
+        }
     }
 
     // 3) 待处理队列:**顶层自己的 + 各层 frame 上报的**
@@ -553,16 +585,23 @@ pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> R
                 continue;
             };
             let Ok(font_bytes) = fetch_font(&kind, &value) else {
+                set_mapping_note(&format!("取字体失败({}): {}", kind, value));
                 continue;
             };
             // 同一个字体只解析一次(按内容哈希缓存)
             let Ok(entries) = analyze_font(matcher.db(), &matcher, &font_bytes) else {
+                set_mapping_note(&format!("分析字体失败: {}", value));
                 continue;
             };
             let mapping = build_mapping(&entries);
             if mapping.is_empty() {
+                set_mapping_note(&format!(
+                    "映射为空(字体 {} 个码位,都没认准)",
+                    entries.len()
+                ));
                 continue;
             }
+            set_mapping_note(&format!("映射建成了: {} 个字", mapping.len()));
             let json: serde_json::Map<String, serde_json::Value> = mapping
                 .iter()
                 .map(|(k, v)| {
@@ -633,7 +672,10 @@ pub fn check_now(app: &tauri::AppHandle, round: u64) -> Result<serde_json::Value
         let probe = if raw_lines == 0 {
             "读不到 Safari 的窗口(通常是没有「自动化 → Safari」权限)".to_string()
         } else if tabs.is_empty() {
-            format!("Safari 共 {} 个标签,但没有目标站点的标签", raw_lines)
+            // **raw_lines 里含 FRONT 那一行**,拿它当标签数会显示成"共 1 个标签",
+            // 看起来像"Safari 里只有 1 个标签",实际是"一个标签都没读到"。
+            // 这两件事必须分开说,否则用户会照着错误的方向去查。
+            "Safari 有窗口,但一个标签的 URL 都读不到".to_string()
         } else {
             format!("共 {} 个标签,首个 {}", tabs.len(), tabs.first().map(|t| t.2.clone()).unwrap_or_default())
         };
