@@ -64,6 +64,15 @@ function installTauriBridge() {
     const strip = document.querySelector('[data-tauri-drag-region]')
     const stripRect = strip ? strip.getBoundingClientRect() : null
     try {
+      // 原生模块状态:顺手探一下**新命令**能不能从界面这一侧调通。
+      // (命令没注册 / 名字对不上 → 这里会记下错误,而不是界面上一片空白)
+      let nativeStatus = null
+      let nativeStatusError = ''
+      try {
+        nativeStatus = await invoke('get_native_status')
+      } catch (e) {
+        nativeStatusError = String(e?.message || e || '调用失败')
+      }
       // 拖拽探针:按下拖拽区时窗口是不是 key window(原生拖拽的前提)
       const dragProbe = { last: lastDragProbe, note: '原生拖拽 data-tauri-drag-region' }
       await invoke('diag_report', {
@@ -72,6 +81,8 @@ function installTauriBridge() {
           hasTauriCore: !!(window.__TAURI__ && window.__TAURI__.core),
           hasInvoke: typeof (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) === 'function',
           hasCnc: typeof window.cnc !== 'undefined' && !!window.cnc,
+          nativeStatus: nativeStatus,
+          nativeStatusError: nativeStatusError,
           panelMax: cs.getPropertyValue('--panel-max').trim(),
           panelPad: cs.getPropertyValue('--panel-pad').trim(),
           innerWidth: window.innerWidth,
