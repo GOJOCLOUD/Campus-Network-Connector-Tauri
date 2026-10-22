@@ -4,21 +4,25 @@
    否则面板四周那圈边距露出来的是**白色底**(而不是桌面),
    看起来就像"圆角矩形外面又套了一层白贴图"。
    白色只由应用自己的卡片提供。 */
-/* 面板尺寸:两个壳不一样,用变量区分
-   Electron:窗口透明,白色圆角面板居中,四周留边距透出桌面
-   Tauri  :窗口不透明,面板必须铺满,否则四周露出一圈窗口白底
-   —— 变量必须**真的被卡片读到**(见 Stepper.jsx 的 cardStyle),
-      只定义不引用 = 白圈照旧出现。 */
+/* 面板几何:**照搬 Electron 版**(同一个产品的另一个正式版本)。
+   Electron 的根容器是 `pt-10 px-2 pb-2`,卡片是 `mx-auto w-full`,
+   阴影用 Tailwind 的 `shadow-md`。这里抄它,别再自己另发明一套 ——
+   之前自己发明的 448 宽 + 大阴影(往下扩 37px),窗口一收就被边缘硬切。 */
 :root {
-  --panel-max: 448px;
-  --panel-pad: 8px;
-  /* 窗口根背景:Electron 透明(透桌面);Tauri 不透明(窗口本身就是面板) */
-  --panel-bg: transparent;
-  /* 卡片外观:Tauri 下窗口自带圆角与阴影,卡片再画一遍就成了"白底上贴一张白卡" */
+  --panel-pad-x: 8px;       /* px-2:卡片左右各留 8px,给阴影透出 */
+  --panel-pad-bottom: 8px;   /* pb-2 */
+  --panel-max: 100%;         /* 卡片 w-full:窗口宽 520 → 卡片 504,和 Electron 一致 */
+  --panel-bg: transparent;   /* 窗口根背景透明,四周露出的是桌面 */
   --card-bg: #fff;
-  --card-radius: 2rem;
+  --card-radius: 2rem;       /* rounded-4xl */
   --card-border: 1px solid #ddd;
-  --card-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+  /* shadow-md(Tailwind 原值)。往下只扩 6px,窗口收得再紧也不会被切。 */
+  --card-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  /* 内容区高度上限:**必须用像素,不能用 vh** ——
+     vh 跟着窗口高度走,窗口高度又跟着内容高度走,两边互相追着跑会塌掉
+     (内容被压扁、窗口越缩越小)。416px = Electron 版在 640 窗口下的 65vh,
+     两边行为一致。 */
+  --content-max: 416px;
 }
 
 html, body, #root {
