@@ -54,3 +54,6 @@ tauri-app/src-tauri/target
 tauri-app/tools/glyph-check/target
 tauri-app/node_modules
 tauri-app/dist
+
+# 界面观感对照截图(工具产物)
+tools/lab/panel-compare/

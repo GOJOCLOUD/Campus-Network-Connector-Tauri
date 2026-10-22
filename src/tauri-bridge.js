@@ -123,8 +123,9 @@ function installTauriBridge() {
     if (!card) return
     const rect = card.getBoundingClientRect()
     if (!rect || !rect.height) return
-    // 卡片底边 + 一点下边距(根容器的 padding),别让面板贴到窗口边缘
-    const want = Math.ceil(rect.bottom + 8)
+    // 卡片底边 + 下边距 + 一点余量(卡片的 shadow-md 往下扩约 6px,
+    // 不留余量的话阴影会被窗口边缘硬切,面板看着像"被剪过")。
+    const want = Math.ceil(rect.bottom + 16)
     try {
       await invoke('window_fit_to_content', { height: want })
     } catch (e) {

@@ -174,7 +174,10 @@ function StepContentWrapper({
 
   return (
     <motion.div
-      style={{ position: 'relative', overflowY: 'auto', maxHeight: '65vh' }}
+      // 高度上限用**像素**(--content-max),不用 vh:
+      // vh 跟着窗口高度走,窗口高度又由内容高度决定 → 两边互相追着跑,
+      // 内容被压扁、窗口越缩越小。用像素就和窗口大小彻底解耦了。
+      style={{ position: 'relative', overflowY: 'auto', maxHeight: 'var(--content-max)' }}
       animate={{ height: isCompleted ? 0 : parentHeight }}
       transition={{ type: 'spring', duration: 0.4 }}
       className={className}
