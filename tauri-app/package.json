@@ -1,0 +1,16 @@
+{
+  "name": "simuinput-tauri",
+  "private": true,
+  "version": "0.0.0",
+  "description": "模拟输入 · Tauri 版（与仓库根目录的 Electron 版并存）",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "touch src-tauri/src/main.rs && tauri build",
+    "check": "cargo run --release --bin glyph-check --",
+    "_note": "touch src-tauri/src/main.rs 是必须的:Tauri 把前端编译进二进制,cargo 的 rerun-if-changed 对目录只看目录 mtime,只改前端不 touch Rust 就会打进旧前端"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.6"
+  }
+}

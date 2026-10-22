@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* 窗口是 transparent 的:body 必须也透明,
+   否则面板四周那圈边距露出来的是**白色底**(而不是桌面),
+   看起来就像"圆角矩形外面又套了一层白贴图"。
+   白色只由应用自己的卡片提供。 */
+html, body, #root {
+  background: transparent;
+}
+
+/* 交互元素禁止拖拽区域，避免点击失效 */
+button, input, textarea, select, a, [role="button"] {
+  -webkit-app-region: no-drag;
+}
+
+/* 无边框窗口:靠拖动面板移动窗口 */
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.app-nodrag {
+  -webkit-app-region: no-drag;
+}
+
+@keyframes fade-in-out {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+  10% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  90% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+}
+
+.animate-fade-in-out {
+  animation: fade-in-out 1s ease-in-out forwards;
+}

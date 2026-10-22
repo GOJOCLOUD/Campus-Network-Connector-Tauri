@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 B：复制事件篡改</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  .target { background: #f4f4f4; padding: 8px 12px; }
+</style>
+</head>
+<body>
+<h1>测试 B：网页主动篡改复制内容</h1>
+<p class="target" id="target">这段文字会被网页在 copy 事件里替换成乱码。</p>
+<script>
+  // 典型反复制手法：在 copy 事件里覆盖 clipboardData
+  document.addEventListener('copy', function (event) {
+    if (event.target && event.target.id === 'target') {
+      event.clipboardData.setData('text/plain', 'TAMPERED-GARBAGE-12345');
+      event.preventDefault();
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "obfuscatedUnderlying": "天地玄黄宇宙洪荒日月盈昃",
+  "obfuscatedDisplay": "人工智能正在改变世界科技",
+  "mixed": {
+    "underlying": "天地玄黄宇宙洪荒",
+    "display": "人工智能正在改变"
+  },
+  "complex": {
+    "underlying": "天地玄黄宇宙洪荒日月盈昃",
+    "display": "人工智能正在改变世界科技"
+  }
+}

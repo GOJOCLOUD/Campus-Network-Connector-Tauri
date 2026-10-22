@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>换题测试页(可切换加密字体)</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  /* 两套加密字体：**同样的码位，画成不同的字**。
+     A: 天→人 地→工 玄→智 …
+     B: 天→工 地→智 玄→能 …
+     换题（换字体）后，如果旧映射泄漏，就会把字还原成上一套的答案。 */
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  @font-face { font-family: "ObfB"; src: url("./fonts/obf-second-style.ttf") format("truetype"); }
+  #target { font-size: 22px; }
+</style>
+</head>
+<body>
+<h1>换题测试页</h1>
+<p>当前题库：<b id="which">A</b>（地址栏 ?font=a / ?font=b 切换）</p>
+<p id="target">天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾</p>
+<p id="target2">水火土金木禾米竹</p>
+<p>普通文字段落，不该被动。</p>
+<script>
+  (function () {
+    var which = (new URLSearchParams(location.search).get('font') || 'a').toLowerCase();
+    if (which !== 'b') which = 'a';
+    document.getElementById('which').textContent = which.toUpperCase();
+    var fam = which === 'b' ? 'ObfB' : 'ObfA';
+    // 两个密文段落：真人拖选时会**跨过这两个节点**（制造跨节点的 Range）
+    document.getElementById('target').style.fontFamily = fam;
+    document.getElementById('target2').style.fontFamily = fam;
+    // 供测试脚本读取当前用的是哪套
+    window.__currentFont = which;
+  })();
+</script>
+</body>
+</html>

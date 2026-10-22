@@ -1,0 +1,64 @@
+[package]
+name = "simuinput-tauri"
+version = "0.0.0"
+description = "模拟输入 · Tauri 版"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "simuinput_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ttf-parser = "0.25"
+ed25519-dalek = "2"
+sha2 = "0.10"
+hex = "0.4"
+rayon = "1"
+flate2 = "1"
+tauri-plugin-shell = "2"
+# 设备指纹用的随机源:跨平台(原来的 libc::arc4random_buf 只有 BSD/macOS 有)
+getrandom = "0.2"
+
+# ── macOS 专属 ─────────────────────────────────────────────
+# CoreGraphics / Carbon / objc2 只在 macOS 上编得过。
+#
+# 注意:**不要**在这里写 `tauri = { features = ["macos-private-api"] }`。
+# tauri-build 的特性校验是**全局**的(不按 target),它要求 Cargo.toml 里
+# tauri 的 features 与 tauri.conf.json 里 macOSPrivateApi 推出的期望值一致;
+# 只要 Cargo.toml 里带着这个特性,Windows 构建就会把 objc2 也拉进来 →
+# 直接死在 "objc2 only works on Apple platforms"。
+#
+# 而且 Tauri 2.12.1 起 `macos-private-api` 已是**空操作**(私有 API 恒开,
+# 透明窗口照常可用),tauri-runtime/tao 里也没有任何 `#[cfg(feature=...)]`
+# 代码路径用它 —— 所以干脆不要这个特性,两个平台都干净。
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSScreen", "NSPasteboard", "NSEvent", "NSAppleScriptExtensions", "NSApplication", "NSMenu", "NSView", "NSGraphics", "NSResponder"] }
+objc2-carbon = "0.3"
+
+# ── Windows 专属 ───────────────────────────────────────────
+# 鼠标/键盘走 SendInput(与 Electron 版的 win-input 同一套约定:
+# 屏幕像素坐标、修饰键位 1=shift 2=ctrl 4=alt 8=win)。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

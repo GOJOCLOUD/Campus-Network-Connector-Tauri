@@ -1,0 +1,21 @@
+# 引擎对拍校验程序 —— **独立 crate,独立 target 目录**。
+#
+# 为什么不能放在 src-tauri 里:放在同一个 package 里时,`cargo build` 会在
+# src-tauri/target/release/ 里留下**两个**可执行文件(校验工具 + 主程序),
+# Tauri 的 bundler 会扫这个目录并把"扫到的那个"当成 App 装进去 ——
+# 结果包里是个不能启动的校验工具(踩了两次)。
+# 独立 crate + 独立 target 目录 = 打包时 target/release 里永远只有一个可执行文件。
+[package]
+name = "glyph-check"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+simuinput-tauri = { path = "../../src-tauri" }
+serde_json = "1"
+flate2 = "1"
+ttf-parser = "0.25"
+
+[profile.release]
+opt-level = "s"
+strip = true

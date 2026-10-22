@@ -1,0 +1,65 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Electron 41 内置 Node 22;Actions 上的 Node 20 已进入退役期
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build .app（native addon + electron-builder + afterPack sign）
+        run: npm run dist:mac:arm64
+
+      # 硬门禁:原生模块必须解包且能加载、引擎能从 asar 里跑起来。
+      # 这条拦的是"装上之后功能是坏的"的老坑,见 ADR-0003。
+      - name: Verify packaged app
+        run: node tools/verify/verify-package.cjs
+
+      # 交付约定:统一出 zip,不再产出 dmg（体积一样,解压即用）。
+      # ditto 能保住 .app 里的符号链接（zip 命令行要额外加 -y）。
+      - name: Package as zip
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "release/mac-arm64/模拟输入.app" "release/CampusNetworkConnector-mac-0.0.0.zip"
+          ls -la release/*.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Campus-Network-Connector-Mac
+          path: release/*.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release（zip 附件，不走 Actions Artifacts）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ZIP="release/CampusNetworkConnector-mac-0.0.0.zip"
+          TAG="mac-${{ github.run_id }}"
+          TITLE="macOS build ${{ github.run_id }} (${{ github.ref_name }})"
+          NOTES="自动构建产物（macOS app zip）。分支：\`${{ github.ref_name }}\`；提交：\`${{ github.sha }}\`。"
+          gh release create "$TAG" "$ZIP" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --prerelease

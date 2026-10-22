@@ -1,0 +1,55 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+python-runtime
+mac-coregraphics/node_modules
+mac-coregraphics/build
+.cache
+release
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 用户在本机识别的输入源 ID（英文/拼音），不提交
+backend/input_source_config.json
+
+# 激活码签发私钥（勿提交）
+license-issuer_副本/
+
+# 安装标记（自动生成）
+backend/install.id
+mac-coregraphics/package-lock.json
+
+# 算法仓(原「浏览器修复」)合并进来后的构建输出
+dist-core
+release-core
+
+# puppeteer 本地浏览器目录(算法侧)
+.browsers/
+
+# 算法仓合并进来后的构建产物（都能用 npm run build:* 重建，不入库）
+vendor/
+tools/reference-fonts/*.crdb
+
+# Tauri 版(Rust)构建产物
+tauri-app/src-tauri/target
+tauri-app/node_modules
+tauri-app/dist
