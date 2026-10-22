@@ -556,7 +556,7 @@ function App() {
     featureList,
     featureStatus,
     onToggleFeature: toggleFeature,
-    // 授权状态:不做成占一整条的大横幅,只在第 4 页放一个小问号
+    // 「辅助功能」授权状态:不做成占一整条的大横幅,只在第 4 页放一个小问号
     // (红=还不能用,绿=可以用),点一下直接跳到系统设置。
     // **只有 macOS 有「辅助功能」这回事**(Windows 的 SendInput 不需要授权),
     // 所以 Windows 上这个小问号根本不出现,免得误报红色。
@@ -592,17 +592,6 @@ function App() {
   return (
     <div
       className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden pt-10 px-2 pb-2"
-      // 顶部 40px 留白(pt-10)是给**原生红绿灯**留的位置 —— 和 Electron 版
-      // 一模一样(那边也是靠 pt-10,红绿灯浮在这 40px 里)。
-      //
-      // 拖窗机制不同但语义相同:
-      //   Electron:根容器 .app-drag → CSS `-webkit-app-region: drag`,
-      //              Chromium 会把 drag 区域往下传给子孙,
-      //              按钮/输入框靠 index.css 的 no-drag 规则退出拖拽。
-      //   Tauri   :根容器 data-tauri-drag-region="deep" → 子树内任意空白处
-      //              拖窗;"deep" 就是"子树"的意思。
-      //              Tauri 自带规则:可点击元素(按钮/输入框/链接…)自动阻止拖拽,
-      //              不需要像 CSS 那样再写一遍 no-drag。
       data-tauri-drag-region="deep"
     >
       {nativeStatus && nativeStatus.ok === false && (
@@ -611,9 +600,6 @@ function App() {
           请重新安装最新版安装包。
         </div>
       )}
-      {/* 「辅助功能」没授权的提示**不再占一整条横幅**:
-          改成第 4 页(键盘输入)右上角一个小问号 —— 红色=还不能用,
-          绿色=可以用,点一下直接跳到系统设置那一页。 */}
       <Stepper
         key={isActivated ? 'active' : 'inactive'}
         initialStep={isActivated ? 2 : 1}
@@ -648,16 +634,17 @@ function App() {
           <DefaultExecutePanel {...defaultExecutePanelProps} />
         </Step>
 
-        {/* 录制要事件监听(CGEventTap),只有 macOS 有 → Windows 不显示这一页。
-            键盘输入(拼音自动键入)两边都要有:
-            macOS 靠 TIS 切输入源,Windows 直接用 Unicode 逐字键入,都能用
-            (见 ADR-0012:Windows 保留拼音输入,不保留录制)。 */}
+        {/* 以下两步是 macOS 专属:录制要事件监听,快捷输入要切换输入源。
+            Windows 版到「默认执行」为止,少两个界面但功能不缺。 */}
         {!isWindows && (
           <Step>
             <ClickPanel {...clickPanelProps} />
           </Step>
         )}
 
+        {/* 键盘输入(拼音自动键入)两边都要有:
+            macOS 靠 TIS 切输入源,Windows 直接用 Unicode 逐字键入,都能用
+            (见 ADR-0012:Windows 保留拼音输入,不保留录制)。 */}
         <Step>
           <KeyboardPanel {...keyboardPanelProps} />
         </Step>

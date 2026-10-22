@@ -172,7 +172,7 @@ async function gotoStep(page, index) {
 /** 量卡片与内容区:高度、底边、有没有被裁 */
 async function probeLayout(page) {
   return page.evaluate(() => {
-    const card = document.querySelector('[data-panel-probe]');
+    const card = document.querySelector('.rounded-4xl');
     if (!card) return { cardH: 0, bottom: 0, scrollerClientH: 0, scrollerScrollH: 0, clipped: true };
     const r = card.getBoundingClientRect();
     const scroller = [...card.querySelectorAll('div')]
@@ -182,6 +182,7 @@ async function probeLayout(page) {
       bottom: Math.round(r.bottom),
       scrollerClientH: scroller ? scroller.clientHeight : 0,
       scrollerScrollH: scroller ? scroller.scrollHeight : 0,
+      scrollerOverflowY: scroller ? getComputedStyle(scroller).overflowY : '',
       clipped: scroller ? scroller.scrollHeight > scroller.clientHeight + 1 : true,
     };
   });
@@ -226,11 +227,19 @@ async function probeLayout(page) {
       await page.close();
     }
 
-    // ── 窗口比内容矮时:卡片不能被压扁,内容更不能被裁掉 ──
+    // ── 窗口比内容矮时:卡片不能被压扁,内容还得翻得到 ──
     // 卡片是 flex 项,默认 flex-shrink:1;它自己带 overflow-hidden,
     // 自动最小尺寸会被算成 0 → 窗口一矮就把卡片压扁。
     // 一旦压扁:①功能被裁;②量出来的底边永远等于"窗口底 - 8px",
     // 于是窗口一直长、内容一直缺(实测卡片 440 被压成 272,内容只剩 66/234)。
+    //
+    // 窗口不够高时**内容区自己滚**(Electron 版就是这么做的:
+    // 内容区 `maxHeight: 65vh` + `overflowY: auto`),
+    // 所以这里的判据不是"没有滚动条",而是:
+    //   ① 卡片没被压扁;
+    //   ② 内容在一个**滚动容器**里(overflowY=auto),超出的部分翻得到,
+    //      而不是被根容器的 overflow-hidden 一刀切掉、哪儿也翻不到;
+    //   ③ 卡片底边超出窗口 → 窗口据此长高(真机上由 fitWindow 收窗口)。
     {
       const page = await browser.newPage();
       await page.setViewport({ width: 520, height: 320, deviceScaleFactor: 1 });
@@ -240,7 +249,11 @@ async function probeLayout(page) {
       await gotoStep(page, 3);
       const m = await probeLayout(page);
       check('窗口比内容矮时卡片不被压扁', m.cardH > 300, `卡片高 ${m.cardH}`);
-      check('窗口比内容矮时内容不被裁掉', !m.clipped, `可视 ${m.scrollerClientH} / 内容 ${m.scrollerScrollH}`);
+      check(
+        '窗口比内容矮时内容在滚动容器里(翻得到,没被根容器一刀切)',
+        m.scrollerOverflowY === 'auto' && m.scrollerScrollH > 0,
+        `overflowY=${m.scrollerOverflowY} 可视 ${m.scrollerClientH} / 内容 ${m.scrollerScrollH}`,
+      );
       check('窗口比内容矮时卡片底边超出窗口(窗口据此长高)', m.bottom > 320, `底边 ${m.bottom}`);
       await page.close();
     }

@@ -57,7 +57,7 @@ function installTauriBridge() {
   // 持续刷新 —— Safari 修复这类后台逻辑的错误是**几秒后才发生**的,
   // 只写启动那一刻的快照看不到任何东西。
   const writeDiag = async () => {
-    const card = document.querySelector('[data-panel-probe]')
+    const card = document.querySelector('.rounded-4xl')
     const rect = card ? card.getBoundingClientRect() : null
     const cardCs = card ? getComputedStyle(card) : null
     // 顶部留白(pt-10)给原生红绿灯 —— 和 Electron 版同一套写法。
@@ -133,8 +133,16 @@ function installTauriBridge() {
   // 高度以**卡片底边**为准(不是窗口高度,也不是根容器高度):卡片是内容高度,
   // 与窗口高度无关,所以收窗口不会引发"收窄→测量变→再收窄"的抖动。
   // 宽度不动 —— 卡片宽度是定死的,动宽度会互相追着跑。
+  //
+  // ⚠️ 卡片是 **React 渲染出来的**,而本文件是在 `main.jsx` 里 import 时
+  // 同步执行的 —— 那时 `createRoot().render()` 还没跑,卡片**根本不存在**。
+  // 之前就是在这里直接 querySelector 一次,拿到 null,observer 再也没挂上,
+  // 结果:窗口只在启动那两次 setTimeout 里被动过一次,之后**永远不跟内容**,
+  // 换页时内容超出窗口就被根容器的 overflow-hidden **横切一刀**。
+  // 现在改成:卡片一出现就挂上,元素被换掉(整个 Stepper 重挂)就重新挂。
+  const CARD_SELECTOR = '.rounded-4xl'
   const fitWindow = async () => {
-    const card = document.querySelector('[data-panel-probe]')
+    const card = document.querySelector(CARD_SELECTOR)
     if (!card) return
     const rect = card.getBoundingClientRect()
     if (!rect || !rect.height) return
@@ -159,8 +167,19 @@ function installTauriBridge() {
       })
     }
     const observer = new ResizeObserver(schedule)
-    const card = document.querySelector('[data-panel-probe]')
-    if (card) observer.observe(card)
+    let observedCard = null
+    const attach = () => {
+      const card = document.querySelector(CARD_SELECTOR)
+      if (!card || card === observedCard) return
+      if (observedCard) observer.unobserve(observedCard)
+      observer.observe(card)
+      observedCard = card
+      schedule()
+    }
+    // 卡片出现 / 被替换都能被发现(换激活态会让整个 Stepper 重挂)
+    const watcher = new MutationObserver(attach)
+    watcher.observe(document.documentElement, { childList: true, subtree: true })
+    attach()
     window.addEventListener('resize', schedule)
   }
   // 首帧之后也贴合一次:首帧时卡片可能还没量出高度

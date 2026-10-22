@@ -257,6 +257,10 @@ fn window_maximize(app: tauri::AppHandle) {
 /// **只调高度**:宽度由布局定死(卡片 448px),动宽度会和前端测量互相追着跑
 /// (窗口变窄 → 卡片变窄 → 再报一个更窄的宽度 → 无限缩小)。
 ///
+/// 高度不许超过**屏幕**:超了窗口底边就跑到屏幕外,面板还是被切掉
+/// (内容多的页面实测会要 747px,笔记本可用高度不够)。
+/// 内容多到屏幕装不下时,界面那边会自己滚动,窗口停在这儿正好。
+///
 /// 差值小于 2px 就不动,免得和前端的测量抖动互相打转。
 #[tauri::command]
 fn window_fit_to_content(app: tauri::AppHandle, height: f64) -> Result<(), String> {
@@ -267,7 +271,14 @@ fn window_fit_to_content(app: tauri::AppHandle, height: f64) -> Result<(), Strin
     let scale = w.scale_factor().map_err(|e| e.to_string())?;
     let cur = w.inner_size().map_err(|e| e.to_string())?;
     let cur_logical = cur.height as f64 / scale;
-    let want = height.round();
+    // 屏幕(逻辑像素)高度:窗口最高只能到这儿,再多底边就出屏了
+    let screen_h = w
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.size().height as f64 / scale)
+        .unwrap_or(f64::MAX);
+    let want = height.round().min(screen_h);
     if (want - cur_logical).abs() < 2.0 {
         return Ok(());
     }
