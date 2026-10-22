@@ -77,6 +77,14 @@ function installTauriBridge() {
         clipped: scroller.scrollHeight > scroller.clientHeight + 1,
       }
       : null
+    // 录制文件清单:老用户从 Electron 版迁过来的文件**也该出现在这里**
+    // (两个版本的数据目录天生不同,不迁就会"自己的录制文件全没了")。
+    let recordingFiles = null
+    try {
+      recordingFiles = await window.cnc?.listFiles?.()
+    } catch (e) {
+      recordingFiles = null
+    }
     try {
       // 原生模块状态:顺手探一下**新命令**能不能从界面这一侧调通。
       // (命令没注册 / 名字对不上 → 这里会记下错误,而不是界面上一片空白)
@@ -113,6 +121,7 @@ function installTauriBridge() {
           cardBorder: cardCs ? cardCs.borderTopWidth + ' ' + cardCs.borderTopStyle : null,
           cardShadow: cardCs ? cardCs.boxShadow : null,
           contentMetrics: contentMetrics,
+          recordingFiles: recordingFiles,
           bodyBg: getComputedStyle(document.body).backgroundColor,
           rootBg: getComputedStyle(document.getElementById('root')).backgroundColor,
           dragProbe: dragProbe,
