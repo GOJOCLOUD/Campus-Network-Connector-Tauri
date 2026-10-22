@@ -696,3 +696,219 @@ pub fn get_native_status() -> Result<serde_json::Value, String> {
     }))
 }
 
+// ── Electron 版数据迁移 ────────────────────────────────────────────
+//
+// 两个版本的**数据目录天生不是同一个**:
+//
+//   Electron:`app.getPath('userData')` 用的是 package.json 里的 `name`
+//            (那个仓库写的是 `xyw`)→ macOS 上是
+//            `~/Library/Application Support/xyw/`,
+//            录制文件在它下面的 `data/recordings/`
+//   Tauri  :`app_data_dir()` 用的是 identifier
+//            → `~/Library/Application Support/com.gojocloud.campus-network-connector.tauri/`,
+//            录制文件直接在 `recordings/`(比 Electron 少一层 `data/`)
+//
+// ⇒ 老用户升级过来会"自己的录制文件全没了"。
+//
+// 这里按 **Electron 自己那套迁移口径**(main.js 的 `migrateLegacyDataFiles`)来:
+// **拷过去、只补缺的、绝不覆盖、绝不删除** —— 两边各自留着自己那份。
+//
+// **激活状态不搬**:那边是设备绑定的(Electron 落盘随机 UUID + HMAC,
+// Tauri 是机器指纹派生),搬过来只会把两边都弄坏 —— 跨版本通用激活码另议。
+
+/// Electron 版的数据目录名(Electron 的 userData = package.json 的 `name`)。
+const ELECTRON_USER_DATA_DIR_NAME: &str = "xyw";
+
+/// 把 `src` 里的 json **补**到 `dst`:只补 `dst` 没有的,已有的一个字节都不动。
+/// 返回补过去的文件数。
+fn fill_missing_json(src: &std::path::Path, dst: &std::path::Path) -> usize {
+    let mut copied = 0;
+    let Ok(rd) = fs::read_dir(src) else {
+        return 0;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let target = dst.join(name);
+        if target.exists() {
+            continue; // 已经有了 —— 绝不覆盖
+        }
+        if fs::copy(&path, &target).is_ok() {
+            copied += 1;
+        }
+    }
+    copied
+}
+
+/// 设置合并:把 `src` 里 **dst 没有的顶层字段** 补进 `dst`(已有的不动)。
+///
+/// 「当前选中的录制文件」也一并带过来 —— 但只在**那个文件确实在 `recordings` 里存在**
+/// 时才带,免得指着一个不存在的文件。
+fn merge_missing_settings(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    recordings: &std::path::Path,
+) -> bool {
+    let Ok(raw) = fs::read_to_string(src) else {
+        return false;
+    };
+    let Ok(serde_json::Value::Object(src_map)) = serde_json::from_str::<serde_json::Value>(&raw)
+    else {
+        return false;
+    };
+    let mut cur: serde_json::Value = match fs::read_to_string(dst)
+        .ok()
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+    {
+        Some(v) if v.is_object() => v,
+        _ => serde_json::json!({}),
+    };
+    let Some(cur_map) = cur.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for (k, v) in src_map.iter() {
+        if !cur_map.contains_key(k) {
+            cur_map.insert(k.clone(), v.clone());
+            changed = true;
+        }
+    }
+    // 当前选中的录制文件:Tauri 侧一般是空串,Electron 侧可能正选着某个文件
+    let our_selected = cur_map
+        .get("selectedJson")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if our_selected.is_empty() {
+        if let Some(theirs) = src_map.get("selectedJson").and_then(|v| v.as_str()) {
+            if !theirs.is_empty() && recordings.join(theirs).is_file() {
+                cur_map.insert("selectedJson".to_string(), theirs.into());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        let _ = fs::write(dst, serde_json::to_string_pretty(&cur).unwrap_or_default());
+    }
+    changed
+}
+
+/// 启动时跑一次:把 Electron 侧的数据补过来。
+pub fn migrate_electron_data(app: &AppHandle) {
+    let Ok(mine) = app.path().app_data_dir() else {
+        return;
+    };
+    let Some(parent) = mine.parent() else {
+        return;
+    };
+    let electron_root = parent.join(ELECTRON_USER_DATA_DIR_NAME);
+    if !electron_root.is_dir() {
+        return; // 没装过 Electron 版:没什么可搬的
+    }
+    let Ok(our_dir) = data_dir(app) else {
+        return;
+    };
+    let Ok(dst_dir) = recordings_dir(app) else {
+        return;
+    };
+
+    // 1) 录制文件:**每次启动都补一遍** —— 老版之后新录的,新版下次启动也能看到
+    let src_dir = electron_root.join("data").join("recordings");
+    if src_dir.is_dir() {
+        fill_missing_json(&src_dir, &dst_dir);
+    }
+
+    // 2) 设置:**只做一次**(写标记)—— 不然会把用户在**新版**改过的设置又盖回去
+    let marker = our_dir.join(".electron-settings-migrated");
+    if !marker.exists() {
+        let src_settings = electron_root.join("settings.json");
+        if src_settings.is_file() {
+            merge_missing_settings(&src_settings, &our_dir.join("settings.json"), &dst_dir);
+        }
+        let _ = fs::write(&marker, now_ms().to_string());
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cnc-migrate-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn 只补缺的_已有的不覆盖() {
+        let root = tmpdir("fill");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.json"), r#"{"v":1}"#).unwrap();
+        fs::write(src.join("b.json"), r#"{"v":2}"#).unwrap();
+        fs::write(src.join("not-json.txt"), "x").unwrap();
+        fs::write(dst.join("b.json"), r#"{"v":999}"#).unwrap();
+
+        assert_eq!(fill_missing_json(&src, &dst), 1);
+        assert!(dst.join("a.json").is_file(), "缺的应该被补上");
+        assert_eq!(
+            fs::read_to_string(dst.join("b.json")).unwrap(),
+            r#"{"v":999}"#,
+            "已有的不能被覆盖"
+        );
+        assert!(!dst.join("not-json.txt").exists(), "只搬 json");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 设置只补顶层缺的字段() {
+        let root = tmpdir("settings");
+        let rec = root.join("recordings");
+        fs::create_dir_all(&rec).unwrap();
+        fs::write(rec.join("点击1.json"), "{}").unwrap();
+        let src = root.join("electron.json");
+        let dst = root.join("tauri.json");
+        fs::write(
+            &src,
+            r#"{"selectedJson":"点击1.json","pinyinSources":{"button":"x"},"autoSwitchIme":true}"#,
+        )
+        .unwrap();
+        fs::write(&dst, r#"{"selectedJson":"","features":{"safari-repair":{"enabled":true}}}"#)
+            .unwrap();
+
+        assert!(merge_missing_settings(&src, &dst, &rec));
+        let out: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dst).unwrap()).unwrap();
+        assert_eq!(out["selectedJson"], "点击1.json");
+        assert_eq!(out["autoSwitchIme"], true);
+        assert_eq!(out["pinyinSources"]["button"], "x");
+        assert_eq!(out["features"]["safari-repair"]["enabled"], true);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 选中的文件不存在时不带过来() {
+        let root = tmpdir("selected");
+        let rec = root.join("recordings");
+        fs::create_dir_all(&rec).unwrap();
+        let src = root.join("electron.json");
+        let dst = root.join("tauri.json");
+        fs::write(&src, r#"{"selectedJson":"不存在.json"}"#).unwrap();
+        fs::write(&dst, r#"{"selectedJson":""}"#).unwrap();
+
+        merge_missing_settings(&src, &dst, &rec);
+        let out: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dst).unwrap()).unwrap();
+        assert_eq!(out["selectedJson"], "");
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+

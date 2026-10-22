@@ -479,6 +479,10 @@ pub fn run() {
             safari_repair_get_status,
         ])
         .setup(|app| {
+            // 老用户升级过来:把 Electron 版的数据(录制文件、设置)补过来。
+            // 两边的数据目录天生不同(Electron 用 package.json 的 name = "xyw",
+            // Tauri 用 identifier),不补的话用户会"自己的录制文件全没了"。
+            appcmd::migrate_electron_data(app.handle());
             // Safari 修复轮询只跟 macOS 有关(靠 osascript 驱动 Safari)
             #[cfg(target_os = "macos")]
             {
