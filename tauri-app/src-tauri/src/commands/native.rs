@@ -136,6 +136,32 @@ pub fn clipboard_read_text() -> Result<String, String> {
     }
 }
 
+/// 写剪贴板里的文本。
+///
+/// 界面里「复制 UUID」用的是 `navigator.clipboard.writeText` —— 那是浏览器 API,
+/// WKWebView 里不一定成(Electron 里是能用的)。这里给一份原生实现,
+/// 桥接层把浏览器的剪贴板 API 接到它上面,**界面代码一个字都不用改**。
+#[tauri::command]
+pub fn clipboard_write_text(text: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+        use objc2_foundation::NSString;
+        let pb = NSPasteboard::generalPasteboard();
+        unsafe {
+            pb.clearContents();
+            let s = NSString::from_str(&text);
+            pb.setString_forType(&s, NSPasteboardTypeString);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Err("剪贴板写入目前只有 macOS 实现".to_string())
+    }
+}
+
 // ── 录制(CGEventTap)────────────────────────────────────
 //
 // 对应 Electron 版 `mac-coregraphics/src/main.mm` 的 6 个导出:

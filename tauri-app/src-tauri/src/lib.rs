@@ -463,6 +463,7 @@ pub fn run() {
             nativecmd::get_current_input_source,
             nativecmd::select_input_source,
             nativecmd::clipboard_read_text,
+            nativecmd::clipboard_write_text,
             nativecmd::start_recording,
             nativecmd::stop_recording,
             nativecmd::get_recording_clicks,
@@ -578,8 +579,17 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
 }
 
 /// 快捷键的组合键字符串。
-const SHORTCUT_DEFAULT_EXECUTE: &str = "CmdOrControl+Shift+A";
-const SHORTCUT_PASTE: &str = "CmdOrControl+Shift+D";
+///
+/// ⚠️ **必须写 `Control`,不能写 `CmdOrControl`**:
+/// Electron 版注册的是 `globalShortcut.register('Ctrl+Shift+A' / 'Ctrl+Shift+D')`
+/// —— 也就是 **⌃⇧A / ⌃⇧D**。
+/// 而 `CmdOrControl` 在 macOS 上会被解析成 **⌘(Command)**(global-hotkey 的
+/// `CMDORCONTROL` 在 macOS 分支映射到 `Modifiers::SUPER`),
+/// 结果就是:系统里监听的是 ⌘⇧D,用户按 ⌃⇧D **什么都不会发生**。
+///
+/// `Control` 在所有平台都是 Control,和 Electron 版完全同口径。
+const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+Shift+A";
+const SHORTCUT_PASTE: &str = "Control+Shift+D";
 
 /// 把组合键字符串解析成插件的 Shortcut。
 fn parse_shortcut(key: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
@@ -590,4 +600,38 @@ fn parse_shortcut(key: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
 /// 组合键的 id —— handler 里按 id 匹配(同一个键只有一个 id)。
 fn shortcut_id(key: &str) -> u32 {
     parse_shortcut(key).map(|s| s.id()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    use tauri_plugin_global_shortcut::Modifiers;
+
+    /// 快捷键必须与 Electron 版**同口径**:⌃⇧A / ⌃⇧D(Control),不是 ⌘⇧(Command)。
+    ///
+    /// 这条写死过:写成了 `CmdOrControl+Shift+D`,在 macOS 上被解析成 ⌘,
+    /// 用户按 ⌃⇧D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
+    #[test]
+    fn 全局快捷键是Control不是Command() {
+        for key in [SHORTCUT_DEFAULT_EXECUTE, SHORTCUT_PASTE] {
+            let s = parse_shortcut(key).unwrap_or_else(|| panic!("解析不了: {}", key));
+            assert!(
+                s.mods.contains(Modifiers::CONTROL),
+                "{} 必须带 Control(⌃),实际 mods={:?}",
+                key,
+                s.mods
+            );
+            assert!(
+                !s.mods.contains(Modifiers::SUPER),
+                "{} 不能带 Command(⌘)—— macOS 上 CmdOrControl 就是 ⌘,和 Electron 版不一致",
+                key
+            );
+            assert!(
+                s.mods.contains(Modifiers::SHIFT),
+                "{} 必须带 Shift,实际 mods={:?}",
+                key,
+                s.mods
+            );
+        }
+    }
 }
