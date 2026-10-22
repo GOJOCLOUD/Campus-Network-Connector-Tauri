@@ -130,8 +130,9 @@ pub fn send_key(key_code: u16, flags: u32) -> Result<bool, String> {
 }
 
 /// 当前输入源 —— Windows 没有等价能力。
-pub fn get_current_input_source() -> Result<String, String> {
-    Ok(String::new())
+/// 当前输入源信息 —— Windows 没有输入源概念(那边直接送 Unicode 字符)。
+pub fn current_input_source_info() -> Result<crate::commands::native::InputSourceInfo, String> {
+    Ok(crate::commands::native::InputSourceInfo::default())
 }
 
 /// 切换输入源 —— Windows 没有等价能力。

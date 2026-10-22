@@ -23,7 +23,8 @@ pub fn send_key(_key_code: u16, _flags: u32) -> Result<bool, String> {
     Err(unsupported("发送按键"))
 }
 
-pub fn get_current_input_source() -> Result<String, String> {
+/// 当前输入源信息 —— 本平台不支持。
+pub fn current_input_source_info() -> Result<crate::commands::native::InputSourceInfo, String> {
     Err(unsupported("读取输入源"))
 }
 

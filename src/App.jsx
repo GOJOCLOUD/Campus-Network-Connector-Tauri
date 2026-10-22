@@ -591,13 +591,20 @@ function App() {
 
   return (
     <div
-      className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden px-2 pb-2"
+      className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden pt-10 px-2 pb-2"
+      // 顶部 40px 留白(pt-10)是给**原生红绿灯**留的位置 —— 和 Electron 版
+      // 一模一样(那边也是靠 pt-10,红绿灯浮在这 40px 里)。
+      //
+      // 拖窗机制不同但语义相同:
+      //   Electron:根容器 .app-drag → CSS `-webkit-app-region: drag`,
+      //              Chromium 会把 drag 区域往下传给子孙,
+      //              按钮/输入框靠 index.css 的 no-drag 规则退出拖拽。
+      //   Tauri   :根容器 data-tauri-drag-region="deep" → 子树内任意空白处
+      //              拖窗;"deep" 就是"子树"的意思。
+      //              Tauri 自带规则:可点击元素(按钮/输入框/链接…)自动阻止拖拽,
+      //              不需要像 CSS 那样再写一遍 no-drag。
+      data-tauri-drag-region="deep"
     >
-      {/* 顶部拖拽条:原生红绿灯浮在这条上。
-          高度 40px = Electron 版的 pt-10,两边红绿灯的位置完全一致。
-          Electron 靠 CSS(-webkit-app-region: drag)拖窗;
-          Tauri 由 tauri-bridge.js 自己算位置拖(不依赖窗口焦点)。 */}
-      <div className="app-drag h-10 shrink-0" data-tauri-drag-region />
       {nativeStatus && nativeStatus.ok === false && (
         <div className="fixed top-0 left-0 right-0 z-50 bg-red-600 text-white text-sm px-4 py-2 shadow">
           模拟输入相关功能不可用：原生模块加载失败（{nativeStatus.error || '未知原因'}）。

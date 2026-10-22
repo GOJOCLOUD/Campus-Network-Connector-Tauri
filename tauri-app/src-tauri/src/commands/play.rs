@@ -151,7 +151,9 @@ pub fn run_clicks(
 }
 
 /// 后台起一个线程跑回放,立刻返回。
-fn spawn_playback(
+/// 在后台线程里跑回放。
+/// 全局快捷键(⌃⇧A)也要用它,所以是 `pub`。
+pub fn spawn_playback(
     file: String,
     clicks: Vec<Value>,
     interval: f64,
@@ -191,9 +193,10 @@ pub fn play_file(
     interval: Option<f64>,
     input_text: Option<String>,
 ) -> Result<Value, String> {
-    // read_file 读不到会报错(文件不存在 / 解析失败)→ 直接把原因带给界面
+    // read_file 读不到会返回 None(文件不存在 / 解析失败)→ 把原因带给界面
     let data = appcmd::read_file(app, file_name.clone())
-        .map_err(|e| format!("读取录制文件失败: {}", e))?;
+        .map_err(|e| format!("读取录制文件失败: {}", e))?
+        .ok_or_else(|| format!("读取录制文件失败: 文件不存在或不是有效的 JSON: {}", file_name))?;
     let clicks = data
         .get("clicks")
         .and_then(|v| v.as_array())

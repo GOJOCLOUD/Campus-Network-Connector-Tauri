@@ -49,7 +49,7 @@ fn recordings_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 // ── 工具 ─────────────────────────────────────────────
 
-fn sha256_hex(data: &[u8]) -> String {
+pub fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     hex::encode(h.finalize())
@@ -274,6 +274,8 @@ pub fn get_activation_snapshot(app: AppHandle) -> Result<serde_json::Value, Stri
 
     Ok(serde_json::json!({
         "deviceUuid": device_uuid,
+        "installId": st.install_id,
+        "machineHash": st.machine_hash,
         "trialUsed": st.trial_used,
         "trialExpiresAt": st.trial_expires_at,
         "license": st.license,
@@ -287,7 +289,10 @@ pub fn get_activation_snapshot(app: AppHandle) -> Result<serde_json::Value, Stri
 pub fn start_trial(app: AppHandle, expires_at: i64) -> Result<serde_json::Value, String> {
     let mut st = read_activation_state(&app);
     if st.trial_used {
-        return Err("该设备已使用过试用".into());
+        // **已经用过了就返回当前快照,不报错** —— 与 Electron 版同口径。
+        // (之前这里 Err,界面上 `await cnc.startTrial(...)` 没有 catch,
+        //  于是变成一次没人处理的 rejection:协议框关不掉、也没任何提示。)
+        return get_activation_snapshot(app);
     }
     st.trial_used = true;
     st.trial_expires_at = expires_at;
@@ -295,13 +300,19 @@ pub fn start_trial(app: AppHandle, expires_at: i64) -> Result<serde_json::Value,
     st.device_uuid = device_uuid(&app);
     st.machine_hash = machine_hash(&app);
     write_activation_state(&app, &st)?;
-    Ok(serde_json::json!({ "status": "success" }))
+    // 返回激活快照(Electron 版 updateActivationState 返回的也是快照)
+    get_activation_snapshot(app)
 }
 
 #[tauri::command]
 pub fn save_license(app: AppHandle, license: String) -> Result<serde_json::Value, String> {
     let du = device_uuid(&app);
-    verify_license(&license, &du)?;
+    // **失败要带原因** —— 界面判的是 `r.ok`,失败时显示 `r.error`
+    // (Electron 版返回 { ok:false, error })。之前这里直接 Err,
+    //  界面只能显示笼统的"激活失败",用户不知道是码错了还是设备不匹配。
+    if let Err(e) = verify_license(&license, &du) {
+        return Ok(serde_json::json!({ "ok": false, "error": e }));
+    }
     let mut st = read_activation_state(&app);
     st.license = license;
     st.install_id = get_install_id(&app)?;
@@ -357,7 +368,7 @@ pub fn migrate_legacy_activation(
     Ok(serde_json::json!({ "ok": true, "changed": changed }))
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -400,79 +411,161 @@ pub fn set_settings(app: AppHandle, patch: serde_json::Value) -> Result<bool, St
 
 // ── 录制文件 ─────────────────────────────────────────
 
+/// 录制文件清单。
+///
+/// 形状与 Electron 版 `file:listFiles` 一致：`[{ id, name }]`
+/// （id 是从 1 开始的序号，name 是文件名含 .json）。
+/// 界面那边自己会再重映射一次 id，两边形状一致才不会各写各的。
 #[tauri::command]
 pub fn list_files(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
     let dir = recordings_dir(&app)?;
-    let mut out = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     if let Ok(rd) = fs::read_dir(&dir) {
         for entry in rd.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-            let clicks = fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.get("clicks").cloned())
-                .unwrap_or(serde_json::json!([]));
-            out.push(serde_json::json!({ "id": name, "name": name, "clicks": clicks }));
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                names.push(name.to_string());
+            }
         }
     }
-    out.sort_by(|a, b| {
-        a.get("name")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .cmp(b.get("name").and_then(|x| x.as_str()).unwrap_or(""))
-    });
-    Ok(out)
+    names.sort();
+    Ok(names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| serde_json::json!({ "id": i + 1, "name": name }))
+        .collect())
 }
 
+/// 下一个自动文件名：`点击N.json`（N = 已有最大值 + 1）。
+/// 与 Electron 版 `getNextRecordingFileName()` 同口径。
+fn next_recording_file_name(dir: &PathBuf) -> String {
+    let mut max_n = 0i64;
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.path();
+            let name = match name.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            // 认 `点击12.json` / `点击_12.json`
+            let rest = match name.strip_prefix("点击") {
+                Some(r) => r,
+                None => continue,
+            };
+            let rest = rest.strip_prefix('_').unwrap_or(rest);
+            let num = match rest.strip_suffix(".json") {
+                Some(n) => n,
+                None => continue,
+            };
+            if let Ok(v) = num.parse::<i64>() {
+                if v > max_n {
+                    max_n = v;
+                }
+            }
+        }
+    }
+    format!("点击{}.json", max_n + 1)
+}
+
+/// ISO8601 UTC 时间戳，和 Electron 的 `new Date().toISOString()` 同一形状：
+/// `2026-10-22T09:30:00.000Z`
+fn iso8601_utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let millis = ms.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // 天数 → 年月日（Howard Hinnant 的 civil_from_days）
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y, m, d, h, mi, s, millis
+    )
+}
+
+/// 保存录制文件。
+///
+/// **参数与返回形状都按 Electron 版 `file:saveFile` 对齐**：
+/// - `filename` **可以不给**（界面上点"保存"就是只传 clicks）：
+///   不给或不给 .json 后缀时自动取 `点击N.json`（Electron 同口径）。
+/// - 返回 `{ status: 'success', file }`，失败 `{ status: 'error', message }`
+///   —— 界面判的是 `data?.status === 'success'`，返回别的形状界面就永远显示"失败"。
 #[tauri::command]
 pub fn save_file(
     app: AppHandle,
     clicks: serde_json::Value,
-    filename: String,
-) -> Result<bool, String> {
+    filename: Option<String>,
+) -> Result<serde_json::Value, String> {
     let dir = recordings_dir(&app)?;
-    let name = if filename.ends_with(".json") {
-        filename
-    } else {
-        format!("{}.json", filename)
+    let name = match filename {
+        Some(n) if !n.trim().is_empty() && n.ends_with(".json") => n,
+        _ => next_recording_file_name(&dir),
     };
-    let body = serde_json::json!({ "clicks": clicks, "savedAt": now_ms() });
-    fs::write(
+    let count = clicks.as_array().map(|a| a.len()).unwrap_or(0);
+    let body = serde_json::json!({
+        "start_time": iso8601_utc(now_ms()),
+        "click_count": count,
+        "clicks": clicks,
+    });
+    match fs::write(
         dir.join(&name),
         serde_json::to_string_pretty(&body).unwrap_or_default(),
-    )
-    .map_err(|e| format!("保存失败: {}", e))?;
-    Ok(true)
+    ) {
+        Ok(_) => Ok(serde_json::json!({ "status": "success", "file": name })),
+        Err(e) => Ok(serde_json::json!({ "status": "error", "message": format!("保存失败: {}", e) })),
+    }
 }
 
+/// 重命名录制文件。返回 `{ status: 'success' }` / `{ status: 'error', message }`。
 #[tauri::command]
-pub fn rename_file(app: AppHandle, old_name: String, new_name: String) -> Result<bool, String> {
+pub fn rename_file(
+    app: AppHandle,
+    old_name: String,
+    new_name: String,
+) -> Result<serde_json::Value, String> {
     let dir = recordings_dir(&app)?;
-    let old = dir.join(&old_name);
     let mut new = new_name.clone();
     if !new.ends_with(".json") {
         new.push_str(".json");
     }
-    fs::rename(&old, dir.join(&new)).map_err(|e| format!("重命名失败: {}", e))?;
-    Ok(true)
+    match fs::rename(dir.join(&old_name), dir.join(&new)) {
+        Ok(_) => Ok(serde_json::json!({ "status": "success" })),
+        Err(e) => Ok(serde_json::json!({ "status": "error", "message": format!("重命名失败: {}", e) })),
+    }
 }
 
+/// 删除录制文件。返回 `{ status: 'success' }` / `{ status: 'error', message }`。
 #[tauri::command]
-pub fn delete_file(app: AppHandle, filename: String) -> Result<bool, String> {
+pub fn delete_file(app: AppHandle, filename: String) -> Result<serde_json::Value, String> {
     let dir = recordings_dir(&app)?;
-    fs::remove_file(dir.join(&filename)).map_err(|e| format!("删除失败: {}", e))?;
-    Ok(true)
+    match fs::remove_file(dir.join(&filename)) {
+        Ok(_) => Ok(serde_json::json!({ "status": "success" })),
+        Err(e) => Ok(serde_json::json!({ "status": "error", "message": format!("删除失败: {}", e) })),
+    }
 }
 
+/// 读录制文件。**读不到返回 null**（Electron 同口径），不是报错 —— 界面那边
+/// 判的是"有没有内容"，不是"有没有失败"。
 #[tauri::command]
-pub fn read_file(app: AppHandle, filename: String) -> Result<serde_json::Value, String> {
+pub fn read_file(app: AppHandle, filename: String) -> Result<Option<serde_json::Value>, String> {
     let dir = recordings_dir(&app)?;
-    let raw = fs::read_to_string(dir.join(&filename)).map_err(|e| format!("读取失败: {}", e))?;
-    Ok(serde_json::from_str(&raw).unwrap_or(serde_json::json!({})))
+    let raw = match fs::read_to_string(dir.join(&filename)) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    Ok(serde_json::from_str(&raw).ok())
 }
 
 // ── 功能清单 ─────────────────────────────────────────
@@ -495,27 +588,49 @@ pub fn get_features() -> Vec<serde_json::Value> {
     })]
 }
 
+/// 功能状态 —— 字段与 Electron 版 `features:getStatus` 对齐。
+///
+/// 界面要看三样:
+/// - `safariRunning`:Safari 没开是**中性状态**(不是故障),要单独提示
+/// - `injected`:已经接管了没有
+/// - `lastError`:为什么没反应(不然用户只看到"已开启"却什么都没发生)
 #[tauri::command]
 pub fn get_feature_status(prefix: String) -> Result<serde_json::Value, String> {
     if prefix == "safariRepair" {
+        // Safari 在不在运行。**问不到 ≠ 没在跑**(多半是缺自动化权限),
+        // 按"在跑"处理,与 Electron 版同口径,免得界面一直误报"Safari 没开"。
+        let safari_running = crate::safari::repair::safari_running_state().unwrap_or(true);
         return Ok(serde_json::json!({
             "enabled": crate::safari::repair::is_enabled(),
             "supported": cfg!(target_os = "macos"),
             "injected": crate::safari::repair::is_injected(),
-            // 失败原因必须回传,界面才显示得出"为什么没反应"
+            "running": crate::safari::repair::is_enabled(),
+            "safariRunning": safari_running,
             "lastError": crate::safari::repair::last_error(),
         }));
     }
     Ok(serde_json::json!({ "enabled": false, "supported": false, "lastError": "" }))
 }
 
+/// 改**运行态**(立刻生效,不落盘)—— 与 Electron 版 `setFeatureEnabled` 同语义。
+/// 界面同时还会调 `setFeatureEnabledSetting` 落盘,两条合起来才是"开关生效且记住"。
 #[tauri::command]
-pub fn set_feature_enabled(app: AppHandle, prefix: String, enabled: bool) -> Result<bool, String> {
+pub fn set_feature_enabled(prefix: String, enabled: bool) -> Result<bool, String> {
     if prefix == "safariRepair" {
         crate::safari::repair::set_enabled(enabled);
-        // 必须落盘:只改内存的话,重启 App 开关就没了 —— 用户会以为"功能坏了"。
-        // (Electron 版一直落在 settings.json 的 features.<功能名>.enabled)
-        let _ = set_feature_enabled_state(&app, "safari-repair", enabled);
+    }
+    Ok(true)
+}
+
+/// 改**落盘状态**(下次启动仍生效)—— 与 Electron 版 `setFeatureEnabledSetting` 同语义。
+#[tauri::command]
+pub fn set_feature_enabled_setting(
+    app: AppHandle,
+    prefix: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    if prefix == "safariRepair" {
+        set_feature_enabled_state(&app, "safari-repair", enabled)?;
     }
     Ok(true)
 }

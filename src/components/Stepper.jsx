@@ -68,24 +68,25 @@ export default function Stepper({
       {...rest}
     >
       {/*
-        shrink-0:**不让卡片被父容器压扁**。
-        卡片是 flex 项,默认 flex-shrink:1;而卡片自己带 overflow-hidden,
-        它的自动最小尺寸(auto)会被算成 0 —— 于是窗口一旦比内容矮,
-        卡片就被压到窗口高度,内容被裁掉,量出来的底边又永远等于
-        "窗口底 - 8px",于是窗口一直长、内容一直缺(实测:卡片 440 被压成 272,
-        内容只剩 66/234)。
-        压扁就不压,让卡片保持内容高度、由窗口去贴合它。
+        卡片:和 Electron 版**逐字同款**(同一个产品的另一个正式版本)。
+        Electron: `relative mx-auto w-full rounded-4xl shadow-md`
+                  + style { border: '1px solid #ddd', backgroundColor: '#fff' }
+        这里直接用它那套类名与 inline style —— 之前自己另造了一层
+        CSS 变量(--card-shadow / --card-radius / --card-border / --panel-max)
+        把同样的值再实现一遍,样式一改就得两边同时改,迟早对不上。
+
+        只有两处是 Tauri 侧**必需**的增补:
+        - data-panel-probe:量卡片尺寸用(窗口贴合内容要靠它)
+        - shrink-0:卡片是 flex 项,默认 flex-shrink:1。Electron 靠
+          min-height:auto(卡片没有 overflow-hidden,自动最小尺寸=内容高度)
+          天然压不扁;这里显式写上,不让它被窗口高度压扁 ——
+          压扁会导致:①内容被裁;②量出来的底边永远等于「窗口底 - 8px」,
+          于是窗口一直长、内容一直缺。
       */}
       <div
         data-panel-probe
-        className={`relative mx-auto flex w-full shrink-0 flex-col overflow-hidden ${stepCircleContainerClassName}`}
-        style={{
-          maxWidth: 'var(--panel-max)',
-          backgroundColor: 'var(--card-bg)',
-          borderRadius: 'var(--card-radius)',
-          border: 'var(--card-border)',
-          boxShadow: 'var(--card-shadow)',
-        }}
+        className={`relative mx-auto w-full shrink-0 rounded-4xl shadow-md ${stepCircleContainerClassName}`}
+        style={{ border: '1px solid #ddd', backgroundColor: '#fff' }}
       >
         {corner ? (
           <div className="app-nodrag absolute top-3 right-3 z-20">{corner}</div>

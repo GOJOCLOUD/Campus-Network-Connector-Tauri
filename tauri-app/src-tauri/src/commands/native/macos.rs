@@ -154,6 +154,15 @@ mod tis {
         ) -> *const c_void;
         pub fn TISCopyInputSourceForLanguage(language: *const c_void) -> *const c_void;
         pub static kTISPropertyInputSourceID: *const c_void;
+        // 名称属性是 `kTISPropertyLocalizedName`(**不是** kTISPropertyInputSourceLocalizedName
+        // —— 后者在 Carbon 里根本没有这个符号,链接期会报 undefined)。
+        pub static kTISPropertyLocalizedName: *const c_void;
+        pub static kTISPropertyInputSourceIsASCIICapable: *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        pub fn CFBooleanGetValue(boolean: *const c_void) -> u8;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -201,14 +210,23 @@ fn input_source_id(ptr: *const core::ffi::c_void) -> Option<String> {
 }
 
 /// 当前输入源(拼音/ABC 等)。
-pub fn get_current_input_source() -> Result<String, String> {
+///
+/// 返回 `{ id, name, isASCII }` —— 与 Electron 版原生模块同一形状。
+pub fn current_input_source_info() -> Result<crate::commands::native::InputSourceInfo, String> {
+    use crate::commands::native::InputSourceInfo;
     unsafe {
         let src = tis::TISCopyCurrentKeyboardInputSource();
         if src.is_null() {
-            return Ok(String::new());
+            return Ok(InputSourceInfo::default());
         }
         let id = tis::TISGetInputSourceProperty(src, tis::kTISPropertyInputSourceID);
-        Ok(input_source_id(id).unwrap_or_default())
+        let name = tis::TISGetInputSourceProperty(src, tis::kTISPropertyLocalizedName);
+        let ascii = tis::TISGetInputSourceProperty(src, tis::kTISPropertyInputSourceIsASCIICapable);
+        Ok(InputSourceInfo {
+            id: input_source_id(id).unwrap_or_default(),
+            name: input_source_id(name).unwrap_or_default(),
+            is_ascii: !ascii.is_null() && tis::CFBooleanGetValue(ascii) != 0,
+        })
     }
 }
 
