@@ -106,7 +106,7 @@ async function shoot(browser, dist, tag) {
   await page.goto(base, { waitUntil: 'networkidle0' });
   await new Promise((r) => setTimeout(r, 900));
   const info = await page.evaluate(() => {
-    const card = document.querySelector('[data-panel-probe]') || document.querySelector('.rounded-4xl');
+    const card = document.querySelector('.rounded-4xl');
     const r = card ? card.getBoundingClientRect() : null;
     return {
       card: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null,
@@ -131,7 +131,7 @@ async function shoot(browser, dist, tag) {
     }, step - 1);
     await new Promise((r) => setTimeout(r, 700));
     const m = await page.evaluate(() => {
-      const card = document.querySelector('[data-panel-probe]') || document.querySelector('.rounded-4xl');
+      const card = document.querySelector('.rounded-4xl');
       const cr = card ? card.getBoundingClientRect() : null;
       // 内容区 = 卡片里那个可滚动的容器
       const scroller = card

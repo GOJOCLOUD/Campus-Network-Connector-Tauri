@@ -67,25 +67,8 @@ export default function Stepper({
       className="flex min-h-0 flex-1 flex-col items-stretch"
       {...rest}
     >
-      {/*
-        卡片:和 Electron 版**逐字同款**(同一个产品的另一个正式版本)。
-        Electron: `relative mx-auto w-full rounded-4xl shadow-md`
-                  + style { border: '1px solid #ddd', backgroundColor: '#fff' }
-        这里直接用它那套类名与 inline style —— 之前自己另造了一层
-        CSS 变量(--card-shadow / --card-radius / --card-border / --panel-max)
-        把同样的值再实现一遍,样式一改就得两边同时改,迟早对不上。
-
-        只有两处是 Tauri 侧**必需**的增补:
-        - data-panel-probe:量卡片尺寸用(窗口贴合内容要靠它)
-        - shrink-0:卡片是 flex 项,默认 flex-shrink:1。Electron 靠
-          min-height:auto(卡片没有 overflow-hidden,自动最小尺寸=内容高度)
-          天然压不扁;这里显式写上,不让它被窗口高度压扁 ——
-          压扁会导致:①内容被裁;②量出来的底边永远等于「窗口底 - 8px」,
-          于是窗口一直长、内容一直缺。
-      */}
       <div
-        data-panel-probe
-        className={`relative mx-auto w-full shrink-0 rounded-4xl shadow-md ${stepCircleContainerClassName}`}
+        className={`relative mx-auto w-full rounded-4xl shadow-md ${stepCircleContainerClassName}`}
         style={{ border: '1px solid #ddd', backgroundColor: '#fff' }}
       >
         {corner ? (
@@ -184,12 +167,7 @@ function StepContentWrapper({
 
   return (
     <motion.div
-      // **不给内容高度设上限**。
-      // Electron 版写死 65vh,是因为它的窗口是固定 640 高、内容超了只能滚动;
-      // Tauri 这边窗口会跟着内容长(见 tauri-bridge.js 的 fitWindow),
-      // 再加个上限就等于把后面的功能藏进滚动条里 —— 界面上就"少了东西"。
-      // 高度完全由内容决定:每个步骤该多高就多高,一个功能都不藏。
-      style={{ position: 'relative', overflowY: 'auto' }}
+      style={{ position: 'relative', overflowY: 'auto', maxHeight: '65vh' }}
       animate={{ height: isCompleted ? 0 : parentHeight }}
       transition={{ type: 'spring', duration: 0.4 }}
       className={className}

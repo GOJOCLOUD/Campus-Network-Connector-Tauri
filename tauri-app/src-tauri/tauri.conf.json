@@ -15,8 +15,9 @@
       {
         "title": "模拟输入-Tauri",
         "width": 520,
-        "height": 320,
+        "height": 640,
         "minWidth": 460,
+        "maxWidth": 520,
         "minHeight": 120,
         "resizable": false,
         "alwaysOnTop": true,
