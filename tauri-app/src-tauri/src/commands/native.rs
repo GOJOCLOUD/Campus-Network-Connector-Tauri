@@ -37,6 +37,14 @@ use windows as imp;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use unsupported as imp;
 
+/// 当前输入源信息 —— 与 Electron 版原生模块返回的对象**同一形状**。
+#[derive(Clone, Default, Debug)]
+pub struct InputSourceInfo {
+    pub id: String,
+    pub name: String,
+    pub is_ascii: bool,
+}
+
 /// 鼠标点击(左键按下+抬起)。坐标是屏幕全局坐标。
 #[tauri::command]
 pub fn mouse_click(x: f64, y: f64) -> Result<bool, String> {
@@ -44,9 +52,13 @@ pub fn mouse_click(x: f64, y: f64) -> Result<bool, String> {
 }
 
 /// 当前鼠标位置(屏幕全局坐标)。
+///
+/// 返回 `{ x, y }` —— 与 Electron 版原生模块(`mac-coregraphics`)同一形状。
+/// (之前返回的是 `[x, y]` 元组,两个壳的接口形状不一样,迟早有人踩。)
 #[tauri::command]
-pub fn mouse_get_position() -> Result<(f64, f64), String> {
-    imp::mouse_get_position()
+pub fn mouse_get_position() -> Result<serde_json::Value, String> {
+    let (x, y) = imp::mouse_get_position()?;
+    Ok(serde_json::json!({ "x": x, "y": y }))
 }
 
 /// 发送文本(按 Unicode 逐字敲入,跨输入法可用)。
@@ -65,9 +77,16 @@ pub fn send_key(key_code: u16, flags: u32) -> Result<bool, String> {
 }
 
 /// 当前输入源(拼音/ABC 等)。只有 macOS 有这个能力。
+///
+/// 返回 `{ id, name, isASCII }` —— 与 Electron 版原生模块同一形状。
 #[tauri::command]
-pub fn get_current_input_source() -> Result<String, String> {
-    imp::get_current_input_source()
+pub fn get_current_input_source() -> Result<serde_json::Value, String> {
+    let info = imp::current_input_source_info()?;
+    Ok(serde_json::json!({
+        "id": info.id,
+        "name": info.name,
+        "isASCII": info.is_ascii,
+    }))
 }
 
 /// 切换输入源(传输入源 id)。只有 macOS 有这个能力。

@@ -23,6 +23,10 @@ hex = "0.4"
 rayon = "1"
 flate2 = "1"
 tauri-plugin-shell = "2"
+# 全局快捷键(⌃⇧A 默认执行 / ⌃⇧D 剪贴板直输)与单实例 ——
+# 这两条是 Electron 版 main.js 里本来就有的能力,ADR-0012 要求 macOS 线全量补齐。
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 # 设备指纹用的随机源:跨平台(原来的 libc::arc4random_buf 只有 BSD/macOS 有)
 getrandom = "0.2"
 

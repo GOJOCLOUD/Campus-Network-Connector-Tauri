@@ -57,12 +57,15 @@ function installTauriBridge() {
   // 持续刷新 —— Safari 修复这类后台逻辑的错误是**几秒后才发生**的,
   // 只写启动那一刻的快照看不到任何东西。
   const writeDiag = async () => {
-    const cs = getComputedStyle(document.documentElement)
     const card = document.querySelector('[data-panel-probe]')
     const rect = card ? card.getBoundingClientRect() : null
     const cardCs = card ? getComputedStyle(card) : null
-    const strip = document.querySelector('[data-tauri-drag-region]')
-    const stripRect = strip ? strip.getBoundingClientRect() : null
+    // 顶部留白(pt-10)给原生红绿灯 —— 和 Electron 版同一套写法。
+    // 注意要量的是 **App 的根容器**(`#root` 的第一个子元素),不是 `#root` 本身
+    // —— `#root` 只是挂载点,边距在 App 那个 div 上。
+    const rootEl = document.getElementById('root')
+    const appRoot = rootEl && rootEl.firstElementChild
+    const rootCs = appRoot ? getComputedStyle(appRoot) : null
     // 内容区(卡片里那个可滚动的容器):**内容比可视区高 = 有功能被藏进滚动条了**
     const scroller = card
       ? [...card.querySelectorAll('div')].find((d) => getComputedStyle(d).overflowY === 'auto')
@@ -94,12 +97,12 @@ function installTauriBridge() {
           hasCnc: typeof window.cnc !== 'undefined' && !!window.cnc,
           nativeStatus: nativeStatus,
           nativeStatusError: nativeStatusError,
-          panelMax: cs.getPropertyValue('--panel-max').trim(),
-          panelPad: cs.getPropertyValue('--panel-pad').trim(),
+          // 卡片用的是哪套类名 —— 用来跟 Electron 版逐字对账
+          cardClass: card ? (typeof card.className === 'string' ? card.className : '') : null,
+          rootPadTop: rootCs ? rootCs.paddingTop : null,
           innerWidth: window.innerWidth,
           innerHeight: window.innerHeight,
           cardRect: rect ? { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) } : null,
-          stripRect: stripRect ? { x: Math.round(stripRect.x), y: Math.round(stripRect.y), w: Math.round(stripRect.width), h: Math.round(stripRect.height) } : null,
           // 白圈判定:卡片与窗口四边的间隙
           ringLeft: rect ? Math.round(rect.x) : null,
           ringRight: rect ? Math.round(window.innerWidth - (rect.x + rect.width)) : null,
@@ -212,7 +215,10 @@ function installTauriBridge() {
     // Tauri 版这两步本来就有对应命令,这里在桥接层拼起来,语义完全一致。
     setCurrentAsInputSource: async (role) => {
       try {
-        const currentId = await invoke('get_current_input_source');
+        // 返回的是 `{ id, name, isASCII }`(与 Electron 版原生模块同形状),
+        // 要的是里面的 id。
+        const current = await invoke('get_current_input_source');
+        const currentId = current && current.id ? current.id : '';
         if (!currentId) return { status: 'error', message: '无法读取当前输入源 ID' };
         const cfg = (await invoke('get_settings')) || {};
         if (role === 'ascii') cfg.ascii_id = currentId;
@@ -325,14 +331,17 @@ function installTauriBridge() {
     // 功能模块
     getFeatures: () => invoke('get_features'),
     getFeatureStatus: (prefix) => invoke('get_feature_status', { prefix }),
+    // setFeatureEnabled = 只改运行态;setFeatureEnabledSetting = 只落盘。
+    // 界面两个都调(Electron 版同口径),合起来才是"立刻生效且下次还在"。
     setFeatureEnabled: (prefix, enabled) => invoke('set_feature_enabled', { prefix, enabled }),
-    setFeatureEnabledSetting: (prefix, enabled) => invoke('set_feature_enabled', { prefix, enabled }),
+    setFeatureEnabledSetting: (prefix, enabled) =>
+      invoke('set_feature_enabled_setting', { prefix, enabled }),
 
     // Safari 复制修复
     safariRepair: {
       getStatus: () => invoke('safari_repair_get_status'),
       setEnabled: (enabled) => invoke('safari_repair_set_enabled', { enabled }),
-      setEnabledSetting: (enabled) => invoke('safari_repair_set_enabled', { enabled }),
+      setEnabledSetting: (enabled) => invoke('safari_repair_set_enabled_setting', { enabled }),
       checkNow: () => invoke('safari_repair_check_now'),
     },
   }
