@@ -16,26 +16,36 @@
 
 ## 一、界面层：逐文件比对的结果
 
-`electron/src` 与 `tauri/src` 的同名文件里，**只有 5 个不同**，其余完全一致：
+> **2026-10-22 更新**：界面层已按 **ADR-0013**（界面层逐字照搬 Electron，不另写界面逻辑）
+> 重做。下面这张表是**重做之后**的最终状态。
 
-| 文件 | 差异 | 处置 |
+`electron/src` 与 `tauri/src` 的同名文件里，**只剩 4 处差异**，其余**逐字相同**：
+
+| 文件 | 剩余差异 | 为什么允许 |
 | --- | --- | --- |
-| `index.css` | Tauri 多了一整层 CSS 变量（`--panel-max` / `--card-bg` / `--card-radius` / `--card-border` / `--card-shadow`） | **删掉**。Electron 是直接用 Tailwind 类 + 两行 inline style，Tauri 也直接用同一套类名 |
-| `components/Stepper.jsx` | Tauri 把 Electron 的类名翻译成变量又实现了一遍；多加了 `flex flex-col overflow-hidden` | **改回 Electron 原款**，只留 Tauri 必需的两处增补（见下） |
-| `App.jsx` | Tauri 的根容器少 `pt-10`，改用一条额外的 40px 拖拽条 div | **改回 Electron 的 `pt-10`**，拖拽标记放回根容器 |
-| `panels/KeyboardPanel.jsx` | Tauri 多了「辅助功能」授权小问号 | **保留**（Electron 根本没有这个提示，没有可照搬的对象；这是 Tauri 侧主动补的） |
-| `main.jsx` | Tauri 多一行 `import './tauri-bridge.js'` | 保留（必需） |
+| `components/Stepper.jsx` | 3 处 `data-tauri-drag-region` | Tauri 必需（Electron 靠 CSS `-webkit-app-region`，WKWebView 不认） |
+| `App.jsx` | 根容器 1 处 `data-tauri-drag-region` + 授权小问号 props + Windows 显示键盘输入页 | 拖拽是 Tauri 必需；小问号与 Windows 键盘页是**已定产品差异**（ADR-0012） |
+| `panels/KeyboardPanel.jsx` | 「辅助功能」授权小问号 | 保留（Electron 根本没有这个提示，没有可照搬的对象；这是 Tauri 侧主动补的） |
+| `main.jsx` | 多一行 `import './tauri-bridge.js'` | 保留（必需） |
+| `index.css` | **无差异**（逐字相同） | — |
 
-### 为什么 `overflow-hidden` 必须拿掉
+### 内容区高度上限：用 Electron 那一行，不另发明
 
-卡片是 flex 项，默认 `flex-shrink: 1`；而卡片自己带 `overflow-hidden`，
-它的**自动最小尺寸（auto）会被算成 0** —— 于是窗口一旦比内容矮：
+Electron 的内容区是 `overflowY: 'auto'` + **`maxHeight: '65vh'`** —— 内容多了就在**中间滚动**，
+卡片高度有上限，底部的按钮行永远在窗口里。
 
-1. 卡片被压到窗口高度（实测 440 → 272），内容被裁（234 → 只剩 66）；
-2. 量出来的底边永远等于「窗口底 − 8px」，于是**窗口一直长、内容一直缺**。
+Tauri 曾把 `maxHeight` 删掉（当时注释的理由是"窗口会跟着内容长"）——**那个理由是错的**：
+内容不压缩 + 根容器 `overflow-hidden` = 超出部分不是滚动，是**被一刀切掉**，而且没有滚动条能翻到。
+现在**逐字用回 Electron 的 `maxHeight: '65vh'`**。
 
-Electron 的卡片没有 `overflow-hidden`，`min-height: auto` 天然就压不扁。
-Tauri 现在也一样（并额外显式写了 `shrink-0`）。
+### 卡片为什么不会被压扁
+
+卡片是 flex 项，默认 `flex-shrink: 1`；如果卡片自己带 `overflow-hidden`，
+它的**自动最小尺寸（auto）会被算成 0** —— 窗口一旦比内容矮，卡片就被压扁（实测 440 → 272），
+量出来的底边永远等于「窗口底 − 8px」，于是**窗口一直长、内容一直缺**。
+
+Electron 的卡片没有 `overflow-hidden`，`min-height: auto` 天然就压不扁；
+两边 `index.css` 逐字相同 ⇒ Tauri 现在也一样（**不再额外写 `shrink-0`**）。
 
 ### 拖拽机制：语义相同、实现不同
 
@@ -156,6 +166,9 @@ node tools/lab/compare-panel-appearance.cjs
 # 界面自检(两个平台一起跑;含"4 页都完整展示""窗口矮时不压扁")
 node tools/verify/verify-ui-platforms.cjs
 
+# 窗口跟随回归(真跑桥接代码,窗口高度真跟着变:换页跟不跟、底部那条在不在)
+node tools/lab/probe-window-fit.cjs
+
 # Rust 自检(含 Safari 修复那三个回归测试)
 cd tauri-app/src-tauri && cargo test --lib -- --nocapture
 
@@ -165,3 +178,5 @@ cd tauri-app/src-tauri && cargo test --lib -- --nocapture
 
 两个仓库的界面文件要保持一致，**改了哪边另一边都要显式搬**；
 搬完用上面的对照脚本量一遍，不一致的地方会直接显形。
+**改动口径见 ADR-0013**：界面层只做逐字照搬，自写的逻辑要先能回答
+「Electron 那边对应的是什么」。
