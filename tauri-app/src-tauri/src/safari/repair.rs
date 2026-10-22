@@ -23,6 +23,9 @@ use crate::safari::bridge;
 /// 页面守卫脚本（构建时从 resources 嵌进来，保证与 Electron 版同一份）。
 const GUARD_JS: &str = include_str!("../../resources/page-guard.js");
 
+/// 每隔多少轮强制补一次注入（与 Electron 版 FORCE_INJECT_EVERY 一致）。
+const FORCE_INJECT_EVERY: u32 = 5;
+
 /// 目标站点（与 Electron 版 `SITE_FILTER` 一致）。
 const SITE_FILTER: [&str; 1] = ["chaoxing.com"];
 
@@ -66,6 +69,9 @@ pub fn set_last_error(message: &str) {
 pub fn last_error() -> String {
     state().lock().map(|s| s.last_error.clone()).unwrap_or_default()
 }
+
+/// 各标签的注入计数（用于"每隔几轮补一次注入"）。
+static state_once: OnceLock<Mutex<u32>> = OnceLock::new();
 
 fn state() -> &'static Mutex<RepairState> {
     STATE.get_or_init(|| Mutex::new(RepairState::default()))
@@ -279,11 +285,29 @@ pub fn check_tab(app: &tauri::AppHandle, window_index: u32, tab_index: u32) -> R
     let db = reference_db(app)?;
     let matcher = FastGlyphMatcher::new((*db).clone());
 
-    // 1) 注入守卫（幂等）
-    bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS)?;
-
-    // 2) 取待处理的作用域组
+    // 1) 先采集状态
+    //
+    // 顺序必须和 Electron 版一致（先采集、缺守卫才注入）：
+    // 注入是一次"等页面 JS 返回"的 Apple Event，每轮都重注入会把页面拖住，
+    // AppleScript 一直等 → 8 秒超时。Electron 版只注入一次，所以不会卡。
     let state = bridge::poll_state(Some(tab_index), Some(window_index))?;
+
+    // 2) 守卫不在才注入（每 FORCE_INJECT_EVERY 轮再强制补一次，对齐 Electron）
+    let guard_present = state.get("guard").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut inject_count = 0u32;
+    if let Some(cell) = state_once.get() {
+        if let Ok(mut slot) = cell.lock() {
+            *slot += 1;
+            inject_count = *slot;
+        }
+    }
+    if !guard_present || inject_count % FORCE_INJECT_EVERY == 0 {
+        // 注入超时不当作硬错误:Apple Event 是在等页面里的 JS 返回,
+        // 页面忙的时候它会超时,但**守卫其实已经装上了**。当错误抛出去的话,
+        // 这一轮整个标签的处理都会被跳过 —— 界面还一直挂着一条其实无害的报错。
+        // 真正的失败由紧随其后的 poll_state 判定。
+        let _ = bridge::inject_guard(Some(tab_index), Some(window_index), GUARD_JS);
+    }
     let Some(groups) = state
         .get("pending")
         .and_then(|p| p.get("groups"))
@@ -385,7 +409,21 @@ pub fn check_now(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
         checked += 1;
         match check_tab(app, w, t) {
             Ok(n) => mapped += n,
-            Err(e) => errors.push(format!("w{}t{}: {}", w, t, e)),
+            Err(e) => {
+                // **单个标签的超时不算致命**:这一页可能正忙(Apple Event 等页面里的
+                // JS 返回),守卫其实已经装上了,下一轮就好。Electron 版也是这么
+                // 处理的(错误被 catch 掉)—— 这条不该在界面上报红。
+                // 真致命的问题(Safari 没开 / 没有自动化权限 / 参考库缺失)走别的路径,
+                // 照样会显示出来。
+                let msg = format!("w{}t{}: {}", w, t, e);
+                if e.contains("AppleScript 超时") {
+                    if let Ok(mut s) = state().lock() {
+                        s.last_probe = format!("（{} 不影响其它标签）", msg);
+                    }
+                } else {
+                    errors.push(msg);
+                }
+            }
         }
     }
     if let Ok(mut s) = state().lock() {

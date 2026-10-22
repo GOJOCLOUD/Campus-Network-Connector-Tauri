@@ -567,3 +567,4 @@ pub fn set_feature_enabled_state(
 pub fn get_native_status() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "ok": cfg!(target_os = "macos") }))
 }
+

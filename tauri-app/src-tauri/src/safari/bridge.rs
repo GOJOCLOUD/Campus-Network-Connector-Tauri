@@ -41,7 +41,8 @@ pub fn osa_async(script: &str, timeout_secs: u64) -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("osascript 启动失败: {}", e))?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(timeout_secs.max(1));
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -67,9 +68,10 @@ pub fn osa_async(script: &str, timeout_secs: u64) -> Result<String, String> {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let waited = started.elapsed().as_secs_f64();
                     return Err(format!(
-                        "AppleScript 超时（{} 秒没返回，多半是 macOS 在等「允许控制 Safari」）",
-                        timeout_secs
+                        "AppleScript 超时（等了 {:.1} 秒还没返回）。可能是这一页正忙、也可能是 macOS 在等「允许控制 Safari」",
+                        waited
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -89,7 +91,8 @@ pub fn run_js_in(target: &str, js: &str) -> Result<String, String> {
         file.display(),
         target
     );
-    let result = osa_async(&script, 8);
+    // 注入守卫 / 下发映射都可能真的需要十几秒(页面在忙),超时给够
+    let result = osa_async(&script, 30);
     let _ = std::fs::remove_file(&file);
     result
 }
@@ -237,3 +240,4 @@ pub fn safari_running_checked() -> Result<bool, String> {
 pub fn safari_running() -> bool {
     safari_running_checked().unwrap_or(false)
 }
+
