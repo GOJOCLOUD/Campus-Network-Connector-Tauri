@@ -581,7 +581,14 @@ function App() {
   }
 
   return (
-    <div className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden pt-10 px-2 pb-2">
+    <div
+      className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden"
+      style={{ padding: 'var(--panel-pad)' }}
+    >
+      {/* 顶部拖拽条:原生红绿灯浮在这条上。
+          Electron 靠 CSS(-webkit-app-region: drag)拖窗;
+          Tauri 由 tauri-bridge.js 自己算位置拖(不依赖窗口焦点)。 */}
+      <div className="app-drag h-9 shrink-0" data-tauri-drag-region />
       {nativeStatus && nativeStatus.ok === false && (
         <div className="fixed top-0 left-0 right-0 z-50 bg-red-600 text-white text-sm px-4 py-2 shadow">
           模拟输入相关功能不可用：原生模块加载失败（{nativeStatus.error || '未知原因'}）。

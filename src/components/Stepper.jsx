@@ -68,13 +68,23 @@ export default function Stepper({
       {...rest}
     >
       <div
-        className={`relative mx-auto w-full rounded-4xl shadow-md ${stepCircleContainerClassName}`}
-        style={{ border: '1px solid #ddd', backgroundColor: '#fff' }}
+        data-panel-probe
+        className={`relative mx-auto flex w-full flex-col overflow-hidden ${stepCircleContainerClassName}`}
+        style={{
+          maxWidth: 'var(--panel-max)',
+          backgroundColor: 'var(--card-bg)',
+          borderRadius: 'var(--card-radius)',
+          border: 'var(--card-border)',
+          boxShadow: 'var(--card-shadow)',
+        }}
       >
         {corner ? (
           <div className="app-nodrag absolute top-3 right-3 z-20">{corner}</div>
         ) : null}
-        <div className={`${stepContainerClassName} app-drag flex w-full items-center p-8`}>
+        <div
+          className={`${stepContainerClassName} app-drag flex w-full items-center p-8`}
+          data-tauri-drag-region="deep"
+        >
           {stepsArray.map((_, index) => {
             const stepNumber = index + 1;
             const isNotLastStep = index < totalSteps - 1;
@@ -116,7 +126,7 @@ export default function Stepper({
         </StepContentWrapper>
 
         {!isCompleted && (
-          <div className={`app-nodrag px-8 pb-8 ${footerClassName}`}>
+          <div className={`app-nodrag px-8 pb-8 ${footerClassName}`} data-tauri-drag-region="false">
             <div className={`mt-10 flex ${currentStep !== 1 ? 'justify-between' : 'justify-end'}`}>
               {currentStep !== 1 && (
                 <button
@@ -241,6 +251,7 @@ function StepIndicator({ step, currentStep, onClickStep, disableStepIndicators =
     <motion.div
       onClick={handleClick}
       className="app-nodrag relative cursor-pointer outline-none focus:outline-none"
+      data-tauri-drag-region="false"
       animate={status}
       initial={false}
     >
