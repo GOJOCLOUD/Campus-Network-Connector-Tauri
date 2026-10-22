@@ -6,15 +6,12 @@
  * 把每个方法映射到对应的 Tauri 命令。
  *
  * 在 Electron 下这个文件是**空操作**（window.cnc 已由 preload 提供，直接跳过）。
+ *
+ * ⚠️ 这里**不允许**再留"空实现/占位"的接口：
+ * 每个方法要么真接到一条 Rust 命令，要么整个不暴露。
+ * 曾经这里有一批 `notImplemented()` 兜底，界面看起来正常、点下去毫无反应
+ * —— 那正是"Tauri 版功能基本都没有"的来源（见 ADR-0012）。
  */
-
-/** 命令没实现时的统一兜底：不让界面崩，只是不生效。 */
-function notImplemented(name) {
-  return async () => {
-    console.warn(`[tauri-bridge] 该功能在 Tauri 版尚未实现: ${name}`)
-    return null
-  }
-}
 
 function installTauriBridge() {
   // Electron：preload 已经提供了 window.cnc
@@ -141,15 +138,54 @@ function installTauriBridge() {
     selectInputSource: (sourceId) => invoke('select_input_source', { sourceId }),
     getInputSourceConfig: () => invoke('get_settings'),
     saveInputSourceConfig: (config) => invoke('set_settings', { patch: config }),
-    setCurrentAsInputSource: notImplemented('setCurrentAsInputSource'),
+    // 把**当前**输入源记成某个角色(ascii / pinyin)的 id。
+    // Electron 版是主进程一条命令干完的(读当前输入源 → 写配置);
+    // Tauri 版这两步本来就有对应命令,这里在桥接层拼起来,语义完全一致。
+    setCurrentAsInputSource: async (role) => {
+      try {
+        const currentId = await invoke('get_current_input_source');
+        if (!currentId) return { status: 'error', message: '无法读取当前输入源 ID' };
+        const cfg = (await invoke('get_settings')) || {};
+        if (role === 'ascii') cfg.ascii_id = currentId;
+        else if (role === 'pinyin') cfg.pinyin_id = currentId;
+        else return { status: 'error', message: '未知角色' };
+        await invoke('set_settings', {
+          patch: { ascii_id: cfg.ascii_id || '', pinyin_id: cfg.pinyin_id || '' },
+        });
+        return { status: 'success', message: '已保存', ...cfg };
+      } catch (e) {
+        return { status: 'error', message: String(e?.message || e || '保存失败') };
+      }
+    },
 
-    // Recording（Tauri 版暂未移植事件监听录制）
-    startRecording: notImplemented('startRecording'),
-    stopRecording: notImplemented('stopRecording'),
-    getRecordingClicks: async () => [],
-    clearRecordingClicks: notImplemented('clearRecordingClicks'),
-    isRecording: async () => false,
-    tapFailed: notImplemented('tapFailed'),
+    // Recording(CGEventTap,macOS 专有;Windows 线按 ADR-0012 不做录制)
+    startRecording: async (excludeRect) => {
+      try {
+        const ok = await invoke('start_recording', { excludeRect: excludeRect || [0, 0, 0, 0] });
+        return ok === true;
+      } catch (e) {
+        // Electron 版主进程失败时返回 {error: msg},界面按这个形状显示
+        return { error: String(e?.message || e || '启动失败') };
+      }
+    },
+    stopRecording: async () => {
+      try {
+        await invoke('stop_recording');
+      } catch (_) {
+        /* 停止失败也要把已录到的点击交回去 */
+      }
+      try {
+        const clicks = await invoke('get_recording_clicks');
+        await invoke('clear_recording_clicks');
+        return Array.isArray(clicks) ? clicks : [];
+      } catch (_) {
+        return [];
+      }
+    },
+    getRecordingClicks: () => invoke('get_recording_clicks').catch(() => []),
+    clearRecordingClicks: () => invoke('clear_recording_clicks').catch(() => false),
+    isRecording: () => invoke('is_recording').catch(() => false),
+    tapFailed: () => invoke('tap_failed').catch(() => false),
 
     // File management
     listFiles: () => invoke('list_files'),
@@ -158,9 +194,24 @@ function installTauriBridge() {
     deleteFile: (filename) => invoke('delete_file', { filename }),
     readFile: (filename) => invoke('read_file', { filename }),
 
-    // Playback（Tauri 版暂未移植回放）
-    playFile: notImplemented('playFile'),
-    playData: notImplemented('playData'),
+    // Playback(回放)
+    // Electron 版的 play:playFile / play:playData 失败时返回 {status:'error', message},
+    // 界面按这个形状显示原因 —— 这里保持一致,别让 Promise 直接 reject
+    // (界面那两处只有 .then,没有 .catch,reject 了用户就什么都看不到)。
+    playFile: async (fileName, interval, inputText) => {
+      try {
+        return await invoke('play_file', { fileName, interval, inputText });
+      } catch (e) {
+        return { status: 'error', message: String(e?.message || e || '执行失败') };
+      }
+    },
+    playData: async (clicks, interval) => {
+      try {
+        return await invoke('play_data', { clicks, interval });
+      } catch (e) {
+        return { status: 'error', message: String(e?.message || e || '执行失败') };
+      }
+    },
     // 拼音自动键入：与 Electron 版 pinyinType 同流程 ——
     // 可选切到 ASCII 输入源 → 等 delaySeconds → 逐字键入
     pinyinInput: async (text, delaySeconds, autoSwitchIme) => {
@@ -194,9 +245,10 @@ function installTauriBridge() {
       setAutoSwitchIme: (enabled) => invoke('set_settings', { patch: { autoSwitchIme: enabled } }),
     },
 
-    // Keepalive（Tauri 版暂未移植）
-    getKeepaliveStatus: async () => ({ enabled: false, ok: false }),
-    setKeepaliveEnabled: notImplemented('setKeepaliveEnabled'),
+    // Keepalive(每 3 分钟一次 HTTPS 保活;Windows 线按 ADR-0012 不做)
+    getKeepaliveStatus: () => invoke('keepalive_get_status').catch(() => false),
+    setKeepaliveEnabled: (enabled) =>
+      invoke('keepalive_set_enabled', { enabled: !!enabled }).catch(() => false),
 
     // 原生模块状态
     getNativeStatus: () => invoke('get_native_status'),

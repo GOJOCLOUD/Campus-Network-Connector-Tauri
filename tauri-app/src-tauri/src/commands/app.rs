@@ -254,7 +254,7 @@ pub fn verify_license(license: &str, device_uuid: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_activation_snapshot(app: AppHandle) -> Result<serde_json::Value, String> {
-    let mut st = read_activation_state(&app);
+    let st = read_activation_state(&app);
     let now = now_ms();
     let device_uuid = device_uuid(&app);
     let mut status = "unactivated";
@@ -478,8 +478,15 @@ pub fn read_file(app: AppHandle, filename: String) -> Result<serde_json::Value, 
 // ── 功能清单 ─────────────────────────────────────────
 
 /// 功能清单：与 Electron 版 `src/features/index.js` 的 FEATURES 保持一致。
+///
+/// `safari-repair` 走 Apple Events，**只有 macOS 有** → Windows 上清单是空的。
+/// （Windows 的浏览器字体纠正走 Chrome/Edge 扩展，独立于桌面应用，
+///   所以桌面应用里不需要、也不该出现这个开关。ADR-0012）
 #[tauri::command]
 pub fn get_features() -> Vec<serde_json::Value> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
     vec![serde_json::json!({
         "id": "safari-repair",
         "title": "Safari 复制修复",
@@ -565,6 +572,12 @@ pub fn set_feature_enabled_state(
 
 #[tauri::command]
 pub fn get_native_status() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "ok": cfg!(target_os = "macos") }))
+    Ok(serde_json::json!({
+        "ok": cfg!(target_os = "macos"),
+        "platform": std::env::consts::OS,
+        // 发合成点击/按键需要 macOS 的「辅助功能」权限;
+        // 没有的话事件会被系统静默丢弃(命令返回成功,但什么都没发生)。
+        "accessibilityTrusted": super::native::accessibility_trusted(),
+    }))
 }
 
