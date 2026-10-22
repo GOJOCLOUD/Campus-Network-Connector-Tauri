@@ -149,12 +149,27 @@ pub fn poll_state(tab_index: Option<u32>, window_index: Option<u32>) -> Result<s
 }
 
 /// 注入页面守卫（幂等：守卫内部有哨兵，重复注入不会叠加监听器）。
-pub fn inject_guard(tab_index: Option<u32>, window_index: Option<u32>, guard_js: &str) -> Result<String, String> {
+///
+/// **同时注入 iframe 桥**（与 Electron 版 `bridge.injectGuard` 同口径）：
+/// 目标站点把题目放在同源 iframe 里，不装桥的话 iframe 里既没有守卫、
+/// 收不到上报，映射也发不进去。
+pub fn inject_guard(
+    tab_index: Option<u32>,
+    window_index: Option<u32>,
+    guard_js: &str,
+    frame_bridge_js: &str,
+) -> Result<String, String> {
     let t = target(tab_index, window_index);
-    run_js_in(&t, guard_js)
+    let combined = format!(
+        "{}\n;\n{}\n;\ntry {{ window.__copyRepairInstallFrameBridge({{ guardSource: {} }}); }} catch (e) {{ window.__copyRepairInjectError = String(e); }}",
+        guard_js,
+        frame_bridge_js,
+        to_ascii_js(guard_js),
+    );
+    run_js_in(&t, &combined)
 }
 
-/// 把映射表写回页面。
+/// 把映射表写回页面（按作用域隔离，并**分发到同源 iframe**）。
 pub fn set_mapping(
     tab_index: Option<u32>,
     window_index: Option<u32>,
@@ -162,8 +177,19 @@ pub fn set_mapping(
     mapping: &serde_json::Value,
 ) -> Result<String, String> {
     let t = target(tab_index, window_index);
+    // 有 iframe 桥就交给它分发到所有同源 frame；没有才回落到顶层守卫。
+    // （Electron 版 bridge.setMapping 同口径）
     let js = format!(
-        "(function(){{ if(!window.__copyRepairSetMapping) return 'NO-GUARD'; return window.__copyRepairSetMapping({}, {}); }})()",
+        "(function(){{
+          var b = window.__copyRepairBridge;
+          if (b && typeof b.setMapping === 'function') return 'FRAMES:' + b.setMapping({}, {});
+          var g = window.__copyRepairGuard;
+          if (!g) return 'NO-GUARD';
+          if (!window.__copyRepairSetMapping) return 'NO-API';
+          return window.__copyRepairSetMapping({}, {});
+        }})()",
+        serde_json::to_string(scope_key).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(mapping).unwrap_or_else(|_| "{}".into()),
         serde_json::to_string(scope_key).unwrap_or_else(|_| "\"\"".into()),
         serde_json::to_string(mapping).unwrap_or_else(|_| "{}".into())
     );
@@ -180,14 +206,22 @@ pub fn set_mapping(
 /// 逐个标签的读取错误**不再被 try 吞掉**，而是写进返回值里
 /// （形如 `ERR:-1743:Not authorized to send Apple events to Safari`）——
 /// 吞掉的话，权限问题会表现成"标签列表是空的"，完全看不出原因。
-/// 返回 (标签列表, 原始行数)。
+/// 返回 (标签列表, 原始行数, 前台标签)。
 ///
 /// 原始行数 = 0 说明**连 Safari 的窗口都读不到** —— 那不是"没有目标标签",
 /// 而是很可能没有 Apple Events 自动化权限（macOS 对无权限的属性读取会静默
 /// 返回空/0）。这两种情况必须分开，否则用户只会看到"什么也没发生"。
-pub fn list_tabs() -> Result<(Vec<(u32, u32, String)>, usize), String> {
+pub fn list_tabs() -> Result<(Vec<(u32, u32, String)>, usize, Option<(u32, u32)>), String> {
     let script = r#"tell application "Safari"
       set out to ""
+      try
+        set frontW to (index of front window) as text
+        set frontT to (index of front tab of front window) as text
+      on error
+        set frontW to "0"
+        set frontT to "0"
+      end try
+      set out to out & "FRONT" & (ASCII character 9) & frontW & (ASCII character 9) & frontT & linefeed
       repeat with wi from 1 to (count of windows)
         repeat with ti from 1 to (count of tabs of window wi)
           try
@@ -202,10 +236,22 @@ pub fn list_tabs() -> Result<(Vec<(u32, u32, String)>, usize), String> {
     end tell"#;
     let raw = osa_async(script, 8)?;
     let mut out = Vec::new();
+    let mut front: Option<(u32, u32)> = None;
     let mut first_error: Option<String> = None;
     for line in raw.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 3 {
+            if parts[0] == "FRONT" {
+                // 前台窗口/前台标签 —— 与 Electron 版同口径:
+                // 前台标签**每轮都处理**(不只目标站点),
+                // 这样"在别的网站上用了混淆字体"也能还原。
+                if let (Ok(w), Ok(t)) = (parts[1].parse::<u32>(), parts[2].parse::<u32>()) {
+                    if w > 0 && t > 0 {
+                        front = Some((w, t));
+                    }
+                }
+                continue;
+            }
             if let (Ok(w), Ok(t)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
                 if parts[2].starts_with("ERR:") && first_error.is_none() {
                     first_error = Some(parts[2].to_string());
@@ -220,7 +266,7 @@ pub fn list_tabs() -> Result<(Vec<(u32, u32, String)>, usize), String> {
             return Err(err);
         }
     }
-    Ok((out, raw_lines))
+    Ok((out, raw_lines, front))
 }
 
 /// Safari 是否在运行(**带错误**)。
