@@ -96,6 +96,26 @@ Electron 的卡片没有 `overflow-hidden`，`min-height: auto` 天然就压不�
 | **置顶层级** | `setAlwaysOnTop(true, 'screen-saver')`（level 1000） | 只有布尔量（floating，level 3）→ 全屏 App 会盖住面板 | 直接把 NSWindow 的 level 设成 1000 |
 | **退出清理** | `before-quit` 注销快捷键 | `app.exit(0)` 直接终止 | 退出前 `unregister_all()` 注销快捷键 |
 
+### 数据目录：两个版本天生不是一个 → 已加迁移
+
+| | Electron | Tauri |
+| --- | --- | --- |
+| 数据根目录 | `app.getPath('userData')` = package.json 的 `name`（那个仓库是 `xyw`）→ `Application Support/xyw/` | `app_data_dir()` = identifier → `Application Support/com.gojocloud.campus-network-connector.tauri/` |
+| 录制文件 | `<根>/data/recordings/` | `<根>/recordings/`（**少一层 `data/`**） |
+| 设置 | `<根>/settings.json` | `<根>/settings.json` |
+
+⇒ 老用户升级过来会"**自己的录制文件全没了**"（界面读的是新目录）。
+已按 **Electron 自己那套口径**（`main.js` 的 `migrateLegacyDataFiles`）补上迁移：
+**只补缺的、绝不覆盖、绝不删除**，两边各自留着自己那份。
+
+| 数据 | 处理 |
+| --- | --- |
+| 录制文件 | 每次启动把老版缺的补过来（老版之后新录的，新版下次启动也能看到） |
+| 设置 | **只做一次**（写 `.electron-settings-migrated` 标记），补顶层缺的字段（输入源选择 / 自动切输入法 / keepalive） |
+| **激活状态** | **不搬** —— 那边是设备绑定的（Electron 落盘随机 UUID + HMAC，Tauri 机器指纹派生），搬过来只会把两边都弄坏。跨版本通用激活码见"四·1" |
+
+自检里能直接看到文件清单（`diag.json` 的 `recordingFiles`），迁移没生效一眼就能看出来。
+
 ---
 
 ## 三、Safari 复制修复：这条线之前**整条是断的**
