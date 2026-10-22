@@ -116,9 +116,40 @@ async function shoot(browser, dist, tag) {
   });
   const file = path.join(OUT, `${tag}.png`);
   await page.screenshot({ path: file, omitBackground: true });
+
+  // 逐页量:面板高度必须跟着内容变,而且**内容不能被裁掉**
+  // (内容区 scrollHeight > clientHeight = 有东西被藏进滚动条了)
+  const perStep = [];
+  for (const step of [1, 2, 3, 4]) {
+    await page.evaluate((i) => {
+      const circles = [...document.querySelectorAll('div')]
+        .filter((d) => typeof d.className === 'string'
+          && d.className.includes('h-8') && d.className.includes('w-8')
+          && d.className.includes('rounded-full'));
+      const target = circles[i];
+      if (target && target.parentElement) target.parentElement.click();
+    }, step - 1);
+    await new Promise((r) => setTimeout(r, 700));
+    const m = await page.evaluate(() => {
+      const card = document.querySelector('[data-panel-probe]') || document.querySelector('.rounded-4xl');
+      const cr = card ? card.getBoundingClientRect() : null;
+      // 内容区 = 卡片里那个可滚动的容器
+      const scroller = card
+        ? [...card.querySelectorAll('div')].find((d) => getComputedStyle(d).overflowY === 'auto')
+        : null;
+      return {
+        cardH: cr ? Math.round(cr.height) : null,
+        clipped: scroller ? scroller.scrollHeight > scroller.clientHeight + 1 : false,
+        scrollerH: scroller ? scroller.clientHeight : null,
+        contentH: scroller ? scroller.scrollHeight : null,
+      };
+    });
+    perStep.push({ step, ...m });
+  }
+
   await page.close();
   server.close();
-  return { file, info };
+  return { file, info, perStep };
 }
 
 (async () => {
@@ -139,6 +170,12 @@ async function shoot(browser, dist, tag) {
       console.log(`${tag}: 卡片 ${JSON.stringify(r.info.card)}  圆角 ${r.info.radius}`);
       console.log(`     阴影 ${r.info.shadow}`);
       console.log(`     截图 ${r.file}`);
+      for (const s of r.perStep) {
+        console.log(
+          `     第${s.step}页 卡片高=${s.cardH} 内容高=${s.contentH} 可视高=${s.scrollerH}`
+          + ` ${s.clipped ? '【内容被裁切!】' : '完整显示'}`
+        );
+      }
     }
   } finally {
     await browser.close();

@@ -169,6 +169,24 @@ async function gotoStep(page, index) {
   await new Promise((r) => setTimeout(r, 500));
 }
 
+/** 量卡片与内容区:高度、底边、有没有被裁 */
+async function probeLayout(page) {
+  return page.evaluate(() => {
+    const card = document.querySelector('[data-panel-probe]');
+    if (!card) return { cardH: 0, bottom: 0, scrollerClientH: 0, scrollerScrollH: 0, clipped: true };
+    const r = card.getBoundingClientRect();
+    const scroller = [...card.querySelectorAll('div')]
+      .find((d) => getComputedStyle(d).overflowY === 'auto');
+    return {
+      cardH: Math.round(r.height),
+      bottom: Math.round(r.bottom),
+      scrollerClientH: scroller ? scroller.clientHeight : 0,
+      scrollerScrollH: scroller ? scroller.scrollHeight : 0,
+      clipped: scroller ? scroller.scrollHeight > scroller.clientHeight + 1 : true,
+    };
+  });
+}
+
 (async () => {
   if (!fs.existsSync(path.join(DIST, 'index.html'))) {
     console.error('✖ 没有 dist/index.html,先跑: npm run build');
@@ -190,6 +208,43 @@ async function gotoStep(page, index) {
   });
 
   try {
+    // ── 每一页的功能都得**完整展示**(不能被藏进滚动条) ──
+    // 窗口宽 520、高 640(Tauri 侧高度由内容决定,这里给一个够用的高度)。
+    {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 520, height: 640, deviceScaleFactor: 1 });
+      await page.evaluateOnNewDocument(stub('darwin'));
+      await page.goto(base, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, 600));
+      let clippedPages = [];
+      for (let i = 0; i < 4; i += 1) {
+        await gotoStep(page, i);
+        const m = await probeLayout(page);
+        if (m.clipped) clippedPages.push(`第${i + 1}页(可视${m.scrollerClientH}/内容${m.scrollerScrollH})`);
+      }
+      check('4 个页面的功能都完整展示(没有被藏进滚动条)', clippedPages.length === 0, clippedPages.join(' '));
+      await page.close();
+    }
+
+    // ── 窗口比内容矮时:卡片不能被压扁,内容更不能被裁掉 ──
+    // 卡片是 flex 项,默认 flex-shrink:1;它自己带 overflow-hidden,
+    // 自动最小尺寸会被算成 0 → 窗口一矮就把卡片压扁。
+    // 一旦压扁:①功能被裁;②量出来的底边永远等于"窗口底 - 8px",
+    // 于是窗口一直长、内容一直缺(实测卡片 440 被压成 272,内容只剩 66/234)。
+    {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 520, height: 320, deviceScaleFactor: 1 });
+      await page.evaluateOnNewDocument(stub('darwin'));
+      await page.goto(base, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, 600));
+      await gotoStep(page, 3);
+      const m = await probeLayout(page);
+      check('窗口比内容矮时卡片不被压扁', m.cardH > 300, `卡片高 ${m.cardH}`);
+      check('窗口比内容矮时内容不被裁掉', !m.clipped, `可视 ${m.scrollerClientH} / 内容 ${m.scrollerScrollH}`);
+      check('窗口比内容矮时卡片底边超出窗口(窗口据此长高)', m.bottom > 320, `底边 ${m.bottom}`);
+      await page.close();
+    }
+
     // ── macOS:四个步骤 ──
     {
       const page = await browser.newPage();

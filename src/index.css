@@ -7,10 +7,9 @@
 /* 面板几何:**照搬 Electron 版**(同一个产品的另一个正式版本)。
    Electron 的根容器是 `pt-10 px-2 pb-2`,卡片是 `mx-auto w-full`,
    阴影用 Tailwind 的 `shadow-md`。这里抄它,别再自己另发明一套 ——
-   之前自己发明的 448 宽 + 大阴影(往下扩 37px),窗口一收就被边缘硬切。 */
+   之前自己发明的 448 宽 + 大阴影(往下扩 37px),窗口一收就被边缘硬切。
+   边距也直接用 Tailwind 类(px-2 / pb-2),不另造变量。 */
 :root {
-  --panel-pad-x: 8px;       /* px-2:卡片左右各留 8px,给阴影透出 */
-  --panel-pad-bottom: 8px;   /* pb-2 */
   --panel-max: 100%;         /* 卡片 w-full:窗口宽 520 → 卡片 504,和 Electron 一致 */
   --panel-bg: transparent;   /* 窗口根背景透明,四周露出的是桌面 */
   --card-bg: #fff;
@@ -18,11 +17,6 @@
   --card-border: 1px solid #ddd;
   /* shadow-md(Tailwind 原值)。往下只扩 6px,窗口收得再紧也不会被切。 */
   --card-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  /* 内容区高度上限:**必须用像素,不能用 vh** ——
-     vh 跟着窗口高度走,窗口高度又跟着内容高度走,两边互相追着跑会塌掉
-     (内容被压扁、窗口越缩越小)。416px = Electron 版在 640 窗口下的 65vh,
-     两边行为一致。 */
-  --content-max: 416px;
 }
 
 html, body, #root {

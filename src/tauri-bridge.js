@@ -63,6 +63,17 @@ function installTauriBridge() {
     const cardCs = card ? getComputedStyle(card) : null
     const strip = document.querySelector('[data-tauri-drag-region]')
     const stripRect = strip ? strip.getBoundingClientRect() : null
+    // 内容区(卡片里那个可滚动的容器):**内容比可视区高 = 有功能被藏进滚动条了**
+    const scroller = card
+      ? [...card.querySelectorAll('div')].find((d) => getComputedStyle(d).overflowY === 'auto')
+      : null
+    const contentMetrics = scroller
+      ? {
+        clientHeight: scroller.clientHeight,
+        scrollHeight: scroller.scrollHeight,
+        clipped: scroller.scrollHeight > scroller.clientHeight + 1,
+      }
+      : null
     try {
       // 原生模块状态:顺手探一下**新命令**能不能从界面这一侧调通。
       // (命令没注册 / 名字对不上 → 这里会记下错误,而不是界面上一片空白)
@@ -98,6 +109,7 @@ function installTauriBridge() {
           cardRadius: cardCs ? cardCs.borderRadius : null,
           cardBorder: cardCs ? cardCs.borderTopWidth + ' ' + cardCs.borderTopStyle : null,
           cardShadow: cardCs ? cardCs.boxShadow : null,
+          contentMetrics: contentMetrics,
           bodyBg: getComputedStyle(document.body).backgroundColor,
           rootBg: getComputedStyle(document.getElementById('root')).backgroundColor,
           dragProbe: dragProbe,

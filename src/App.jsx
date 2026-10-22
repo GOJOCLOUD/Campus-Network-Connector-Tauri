@@ -591,8 +591,7 @@ function App() {
 
   return (
     <div
-      className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden"
-      style={{ padding: '0 var(--panel-pad-x) var(--panel-pad-bottom)' }}
+      className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden px-2 pb-2"
     >
       {/* 顶部拖拽条:原生红绿灯浮在这条上。
           高度 40px = Electron 版的 pt-10,两边红绿灯的位置完全一致。
