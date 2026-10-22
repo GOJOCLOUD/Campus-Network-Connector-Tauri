@@ -2,7 +2,7 @@
   "name": "simuinput-tauri",
   "private": true,
   "version": "0.0.0",
-  "description": "模拟输入 · Tauri 版（与仓库根目录的 Electron 版并存）",
+  "description": "模拟输入 · Tauri 版（与 Electron 版仓库并存，两个正式版本，同等优先）",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
