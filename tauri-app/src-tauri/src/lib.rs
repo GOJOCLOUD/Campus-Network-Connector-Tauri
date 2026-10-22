@@ -46,13 +46,14 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                 }),
             );
             // 原生能力状态:能不能发合成点击/按键(辅助功能权限)
+            // 录制相关走 `native::rec` —— macOS 是真实现,其它平台是占位实现。
             obj.insert(
                 "native".to_string(),
                 serde_json::json!({
                     "accessibilityTrusted": commands::native::accessibility_trusted(),
-                    "recording": commands::native::recording::is_recording(),
-                    "recordingClicks": commands::native::recording::get_recording_clicks().len(),
-                    "tapFailed": commands::native::recording::tap_failed(),
+                    "recording": commands::native::rec::is_recording(),
+                    "recordingClicks": commands::native::rec::get_recording_clicks().len(),
+                    "tapFailed": commands::native::rec::tap_failed(),
                 }),
             );
             // 最近一次回放:执行了几条、为什么没执行
