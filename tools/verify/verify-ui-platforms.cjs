@@ -49,7 +49,7 @@ function serveDist() {
 }
 
 /** 造一个够用的 window.cnc 桩 */
-function stub(platform) {
+function stub(platform, accessibilityTrusted = false) {
   return `(function () {
     window.cnc = {
       platform: ${JSON.stringify(platform)},
@@ -57,7 +57,7 @@ function stub(platform) {
       getFeatures: async () => [],
       getFeatureStatus: async () => null,
       setFeatureEnabled() {}, setFeatureEnabledSetting() {},
-      getNativeStatus: async () => ({ ok: true, platform: ${JSON.stringify(platform)} }),
+      getNativeStatus: async () => ({ ok: true, platform: ${JSON.stringify(platform)}, accessibilityTrusted: ${JSON.stringify(accessibilityTrusted)} }),
       getActivationSnapshot: async () => ({
         deviceUuid: 'test-uuid', trialUsed: true,
         trialExpiresAt: Date.now() + 86400000, licenseValid: true, license: ''
@@ -139,6 +139,36 @@ async function probe(page) {
   });
 }
 
+/**
+ * 找「辅助功能」授权小问号。
+ * 它必须是个**小问号**,不是占一整条的大横幅 ——
+ * 红=还不能用,绿=可以用,灰=状态未知。
+ */
+async function probeBadge(page) {
+  return page.evaluate(() => {
+    const btn = [...document.querySelectorAll('button')]
+      .find((b) => (b.textContent || '').trim() === '?');
+    if (!btn) return null;
+    return {
+      cls: typeof btn.className === 'string' ? btn.className : '',
+      title: btn.getAttribute('title') || '',
+    };
+  });
+}
+
+/** 点到第 n 个步骤(0 起) */
+async function gotoStep(page, index) {
+  await page.evaluate((i) => {
+    const circles = [...document.querySelectorAll('div')]
+      .filter((d) => typeof d.className === 'string'
+        && d.className.includes('h-8') && d.className.includes('w-8')
+        && d.className.includes('rounded-full'));
+    const target = circles[i];
+    if (target && target.parentElement) target.parentElement.click();
+  }, index);
+  await new Promise((r) => setTimeout(r, 500));
+}
+
 (async () => {
   if (!fs.existsSync(path.join(DIST, 'index.html'))) {
     console.error('✖ 没有 dist/index.html,先跑: npm run build');
@@ -171,21 +201,28 @@ async function probe(page) {
       check('macOS 保留「默认执行」', s.text.includes('默认执行'));
 
       // 点到第 3、4 步,确认这两个界面在 macOS 上真的还在
-      const clickStep = async (index) => {
-        await page.evaluate((i) => {
-          const circles = [...document.querySelectorAll('div')]
-            .filter((d) => typeof d.className === 'string'
-              && d.className.includes('h-8') && d.className.includes('w-8')
-              && d.className.includes('rounded-full'));
-          const target = circles[i];
-          if (target && target.parentElement) target.parentElement.click();
-        }, index);
-        await new Promise((r) => setTimeout(r, 500));
-      };
-      await clickStep(2);
+      await gotoStep(page, 2);
       check('macOS 第 3 步是「模拟点击」(录制)', (await probe(page)).text.includes('模拟点击'));
-      await clickStep(3);
+      await gotoStep(page, 3);
       check('macOS 第 4 步是「键盘输入」(快捷输入)', (await probe(page)).text.includes('键盘输入'));
+
+      // 授权提示:必须是第 4 页的一个**小问号**,不能是占一整条的大横幅
+      const badge = await probeBadge(page);
+      check('第 4 页有「辅助功能」授权小问号', !!badge, badge ? '' : '没找到');
+      check('没授权时问号是红色的', !!badge && badge.cls.includes('text-red-600'), badge ? badge.cls : '');
+      check('界面上没有那条橙色大横幅了', !(await probe(page)).text.includes('未获得「辅助功能」权限'));
+      await page.close();
+    }
+
+    // ── 已授权时:小问号应该是绿的 ──
+    {
+      const page = await browser.newPage();
+      await page.evaluateOnNewDocument(stub('darwin', true));
+      await page.goto(base, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, 600));
+      await gotoStep(page, 3);
+      const badge = await probeBadge(page);
+      check('已授权时问号是绿色的', !!badge && badge.cls.includes('text-emerald-600'), badge ? badge.cls : '没找到');
       await page.close();
     }
 
@@ -232,6 +269,9 @@ async function probe(page) {
       const winStep3 = await probe(page);
       check('Windows 第 3 步是「键盘输入」(拼音自动键入)', winStep3.text.includes('键盘输入'));
       check('Windows 第 3 步有「开始输入」按钮', winStep3.text.includes('开始输入'));
+      const winBadge = await probeBadge(page);
+      check('Windows 不显示授权小问号(Windows 没有「辅助功能」这回事)', !winBadge);
+      check('Windows 界面上没有橙色大横幅', !winStep3.text.includes('未获得「辅助功能」权限'));
       await page.close();
     }
   } finally {

@@ -556,6 +556,15 @@ function App() {
     featureList,
     featureStatus,
     onToggleFeature: toggleFeature,
+    // 授权状态:不做成占一整条的大横幅,只在第 4 页放一个小问号
+    // (红=还不能用,绿=可以用),点一下直接跳到系统设置。
+    // **只有 macOS 有「辅助功能」这回事**(Windows 的 SendInput 不需要授权),
+    // 所以 Windows 上这个小问号根本不出现,免得误报红色。
+    showAccessibilityBadge: isMac,
+    accessibilityTrusted: isMac
+      ? (nativeStatus ? nativeStatus.accessibilityTrusted === true : null)
+      : null,
+    onOpenAccessibilitySettings: () => cnc.openAccessibilitySettings?.(),
   }
 
   const renameDialogProps = {
@@ -595,13 +604,9 @@ function App() {
           请重新安装最新版安装包。
         </div>
       )}
-      {nativeStatus && nativeStatus.ok !== false && nativeStatus.accessibilityTrusted === false && (
-        <div className="fixed bottom-0 left-0 right-0 z-50 bg-amber-600 text-white text-xs px-4 py-2 shadow leading-relaxed">
-          未获得「辅助功能」权限 —— 模拟点击、回放、拼音自动键入都发不出去（事件会被系统静默丢弃，界面却显示成功）。
-          请到「系统设置 → 隐私与安全性 → 辅助功能」勾选本应用，然后重新打开本软件。
-          （只「录制」不需要这个权限，可以先用。）
-        </div>
-      )}
+      {/* 「辅助功能」没授权的提示**不再占一整条横幅**:
+          改成第 4 页(键盘输入)右上角一个小问号 —— 红色=还不能用,
+          绿色=可以用,点一下直接跳到系统设置那一页。 */}
       <Stepper
         key={isActivated ? 'active' : 'inactive'}
         initialStep={isActivated ? 2 : 1}
