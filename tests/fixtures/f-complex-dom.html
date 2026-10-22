@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 F：复杂 DOM</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  .card { border: 1px solid #ddd; padding: 12px; margin: 12px 0; }
+  .obf { font-family: "ObfA"; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>测试 F：嵌套元素与跨节点选区</h1>
+<div class="card" id="card">
+  <div>外层开始 <span>跨节点 <b>加粗文字</b> 继续</span> 外层结束</div>
+  <p class="obf" id="obf">天地玄黄宇宙</p>
+  <div class="hidden" id="hidden">隐藏内容不应出现</div>
+</div>
+<div id="dynamic"></div>
+<script>
+  // 动态插入内容
+  setTimeout(function () {
+    var box = document.getElementById('dynamic');
+    box.innerHTML = '<p class="obf" id="late">洪荒日月盈昃</p>';
+  }, 300);
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>字体混淆测试页</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  #target, #target2, #target3 { font-family: "ObfA"; font-size: 22px; }
+</style>
+</head>
+<body>
+<h1>字体混淆测试页</h1>
+<p>下面这段的 DOM 字符是乱码，字体把它渲染成正常句子：</p>
+<p id="target">天地玄黄宇宙洪荒日月盈昃</p>
+<p id="target2">辰宿列张寒来暑往秋收冬藏</p>
+<!-- #target3 用的是**另一批从未被采集过的**密文字：
+     用来复现"选区刚换、采集缓存还没更新就复制"（真实故障：测验页第二题出现新密文字，
+     前半句修好了、后半句仍是密文）。选它就是为了让采集缓存里查不到这些字。 -->
+<p id="target3">闰余成岁律吕调阳云腾致雨露结为霜金生丽水玉出昆冈</p>
+</body>
+</html>

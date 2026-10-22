@@ -1,0 +1,7 @@
+{
+  "name": "@cnc/core",
+  "private": true,
+  "version": "0.0.0",
+  "description": "字形还原算法核心（浏览器无关，TypeScript）。type=module 让 .ts 单元测试按 ESM 跑。",
+  "type": "module"
+}

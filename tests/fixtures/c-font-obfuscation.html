@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 C：字体混淆</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  #target { font-family: "ObfA"; font-size: 22px; }
+  .normal { font-family: "PingFang SC", sans-serif; }
+</style>
+</head>
+<body>
+<h1>测试 C：自定义字体把底层字符映射成不同的可见汉字</h1>
+<p>下面这段文字的 DOM 内容是乱码，但字体把它渲染成正常句子：</p>
+<p id="target">天地玄黄宇宙洪荒日月盈昃</p>
+<p class="normal">对照组：人工智能正在改变世界科技（正常字体，应原样复制）</p>
+</body>
+</html>

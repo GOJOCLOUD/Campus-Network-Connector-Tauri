@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>通用性测试页(多作用域/同字符跨作用域)</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  /* 第二套混淆字体：**同样的码位**，但画成不同的字（天→工、地→智…） */
+  @font-face { font-family: "ObfB"; src: url("./fonts/obf-second-style.ttf") format("truetype"); }
+  .obf { font-family: "ObfA"; font-size: 22px; }
+  .obfB { font-family: "ObfB"; font-size: 22px; }
+  .plain { font-family: "PingFang SC", sans-serif; font-size: 22px; }
+</style>
+</head>
+<body>
+<h1>通用性测试页</h1>
+<p>下面这些用例检验的是「机制」而不是某一道题：同一个字符同时出现在密文作用域与普通作用域、
+    多个作用域混在一次选区里、纯普通文字不该被动。</p>
+
+<!-- ① 同一字符跨两个作用域：普通在前(天→天) + 密文在后(天→人) -->
+<p id="s1-plain-first"><span class="plain">天</span><span class="obf">天</span></p>
+
+<!-- ② 同一字符跨两个作用域：密文在前(天→人) + 普通在后(天→天) -->
+<p id="s2-obf-first"><span class="obf">天</span><span class="plain">天</span></p>
+
+<!-- ③ 纯密文 -->
+<p id="s3-pure-obf"><span class="obf">天地玄黄宇宙洪荒日月盈昃</span></p>
+
+<!-- ④ 纯普通文字（一个字都不该动） -->
+<p id="s4-pure-plain">这是一段完全正常的普通文字，不应该被改动。</p>
+
+<!-- ⑤ 密文与普通文字混在同一段里 -->
+<p id="s5-mixed"><span class="obf">天地玄黄</span>普通文字<span class="obf">宇宙洪荒</span></p>
+
+<!-- ⑥ 同一个字在**两种混淆字体**里，含义不同（最狠的一种） -->
+<p id="s6-two-fonts"><span class="obf">天地玄黄</span><span class="obfB">天地玄黄</span></p>
+</body>
+</html>

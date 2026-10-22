@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 D：动态更换字体</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  #target { font-family: "ObfA"; }
+</style>
+</head>
+<body>
+<h1>测试 D：同一个字体族名下更换字体文件</h1>
+<p id="target">天地玄黄宇宙洪荒日月盈昃</p>
+<button id="swap">换成另一个字体文件</button>
+<script>
+  // 直接改写同一条 @font-face 规则：family 名不变，src 变化。
+  // 这会让扩展面对"同一个作用域、字体内容已变"的情况，必须作废旧缓存。
+  window.swapFont = function () {
+    const sheet = document.styleSheets[0];
+    for (const rule of sheet.cssRules) {
+      if (rule.type === CSSRule.FONT_FACE_RULE && rule.style.getPropertyValue('font-family').includes('ObfA')) {
+        rule.style.setProperty('src', 'url("./fonts/obf-same-style-2.ttf") format("truetype")');
+      }
+    }
+    document.getElementById('target').textContent = '天地玄黄宇宙洪荒日月盈昃';
+  };
+</script>
+</body>
+</html>

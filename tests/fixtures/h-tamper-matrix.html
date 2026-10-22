@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 H：复制劫持矩阵</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  #target { background: #f4f4f4; padding: 8px 12px; }
+</style>
+</head>
+<body>
+<h1>复制劫持矩阵</h1>
+<p>模式：<code id="mode">none</code></p>
+<p id="target">天地玄黄宇宙洪荒日月盈昃</p>
+<script>
+// 劫持模式由 ?mode= 决定
+const mode = new URLSearchParams(location.search).get('mode') || 'none';
+document.getElementById('mode').textContent = mode;
+
+const TEXT = '天地玄黄宇宙洪荒日月盈昃';
+const GARBAGE = 'HIJACKED-BY-PAGE';
+
+window.__hijackLog = [];
+
+switch (mode) {
+  case 'win-capture-setdata': {
+    // 网页脚本先执行 → 它的 window 捕获监听器**先注册**，在我们的守卫之前
+    window.addEventListener('copy', (e) => {
+      window.__hijackLog.push('win-capture-setdata');
+      e.clipboardData.setData('text/plain', GARBAGE);
+    }, true);
+    break;
+  }
+  case 'win-capture-prevent': {
+    window.addEventListener('copy', (e) => {
+      window.__hijackLog.push('win-capture-prevent');
+      e.preventDefault();
+    }, true);
+    break;
+  }
+  case 'doc-capture-setdata': {
+    document.addEventListener('copy', (e) => {
+      window.__hijackLog.push('doc-capture-setdata');
+      e.clipboardData.setData('text/plain', GARBAGE);
+    }, true);
+    break;
+  }
+  case 'doc-bubble-setdata': {
+    document.addEventListener('copy', (e) => {
+      window.__hijackLog.push('doc-bubble-setdata');
+      e.clipboardData.setData('text/plain', GARBAGE);
+    }, false);
+    break;
+  }
+  case 'doc-bubble-stopimmediate': {
+    document.addEventListener('copy', (e) => {
+      window.__hijackLog.push('doc-bubble-stopimmediate');
+      e.stopImmediatePropagation();
+    }, false);
+    break;
+  }
+  case 'cached-native': {
+    // 最刁钻：网页在解析时缓存原生方法，绕过原型 patch
+    const cachedSetData = DataTransfer.prototype.setData;
+    const cachedPreventDefault = Event.prototype.preventDefault;
+    window.addEventListener('copy', (e) => {
+      window.__hijackLog.push('cached-native');
+      cachedSetData.call(e.clipboardData, 'text/plain', GARBAGE);
+      cachedPreventDefault.call(e);
+    }, true);
+    break;
+  }
+  case 'none':
+  default:
+    break;
+}
+</script>
+</body>
+</html>

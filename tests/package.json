@@ -1,0 +1,7 @@
+{
+  "name": "@cnc/tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "跨浏览器端到端测试与测试页夹具。type=module 让 .ts 用例按 ESM 跑。",
+  "type": "module"
+}

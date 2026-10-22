@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "模拟输入-Tauri",
+  "version": "0.0.0",
+  "identifier": "com.gojocloud.campus-network-connector.tauri",
+  "build": {
+    "frontendDist": "../../dist",
+    "devUrl": "http://localhost:5174",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "模拟输入-Tauri",
+        "width": 520,
+        "height": 640,
+        "minWidth": 460,
+        "minHeight": 560,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "decorations": true,
+        "transparent": true,
+        "shadow": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 12
+        },
+        "acceptFirstMouse": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": [
+      "resources/glyph-db-48.crdb.gz"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

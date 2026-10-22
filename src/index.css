@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* 窗口是 transparent 的:body 必须也透明,
+   否则面板四周那圈边距露出来的是**白色底**(而不是桌面),
+   看起来就像"圆角矩形外面又套了一层白贴图"。
+   白色只由应用自己的卡片提供。 */
+/* 面板尺寸:两个壳不一样,用变量区分
+   Electron:窗口透明,白色圆角面板居中,四周留边距透出桌面
+   Tauri  :窗口不透明,面板必须铺满,否则四周露出一圈窗口白底
+   —— 变量必须**真的被卡片读到**(见 Stepper.jsx 的 cardStyle),
+      只定义不引用 = 白圈照旧出现。 */
+:root {
+  --panel-max: 448px;
+  --panel-pad: 8px;
+  /* 窗口根背景:Electron 透明(透桌面);Tauri 不透明(窗口本身就是面板) */
+  --panel-bg: transparent;
+  /* 卡片外观:Tauri 下窗口自带圆角与阴影,卡片再画一遍就成了"白底上贴一张白卡" */
+  --card-bg: #fff;
+  --card-radius: 2rem;
+  --card-border: 1px solid #ddd;
+  --card-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+}
+
+html, body, #root {
+  background: var(--panel-bg);
+}
+
+/* 交互元素禁止拖拽区域，避免点击失效 */
+button, input, textarea, select, a, [role="button"] {
+  -webkit-app-region: no-drag;
+}
+
+/* 无边框窗口:靠拖动面板移动窗口 */
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.app-nodrag {
+  -webkit-app-region: no-drag;
+}
+
+@keyframes fade-in-out {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+  10% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  90% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+}
+
+.animate-fade-in-out {
+  animation: fade-in-out 1s ease-in-out forwards;
+}

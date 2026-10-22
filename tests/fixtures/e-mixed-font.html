@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 E：混合字体</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  @font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }
+  .obf { font-family: "ObfA"; }
+  .other { font-family: "Songti SC", serif; }
+</style>
+</head>
+<body>
+<h1>测试 E：正常文字 + 混淆文字 + 其它作用域</h1>
+<p id="mixed"><span class="plain">正常开头文字，</span><span class="obf">天地玄黄</span><span class="plain">中间正常文字，</span><span class="other">宋体作用域文字</span><span class="obf">宇宙洪荒</span><span class="plain">结尾正常文字。</span></p>
+</body>
+</html>
