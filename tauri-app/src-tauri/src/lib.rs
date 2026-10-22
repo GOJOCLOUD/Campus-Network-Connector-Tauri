@@ -38,12 +38,23 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                 }),
             );
             // 全局快捷键:注册成功没有(Electron 版有 ⌃⇧A / ⌃⇧D 两个)
+            // macOS 是自己监听事件(见 native::hotkey),那边还有 tap 的状态;
+            // 其它平台是系统的全局热键。
+            #[cfg(target_os = "macos")]
+            let tap_state = nativecmd::hotkey::diagnostics();
+            #[cfg(not(target_os = "macos"))]
+            let tap_state = serde_json::Value::Null;
             obj.insert(
                 "shortcuts".to_string(),
                 serde_json::json!({
                     "registered": registered_shortcuts(),
                     "defaultExecute": SHORTCUT_DEFAULT_EXECUTE,
                     "paste": SHORTCUT_PASTE,
+                    "tap": tap_state,
+                    // 最近命中的几次:命中了哪个键、动作结果、当时输入源。
+                    // "按了没反应"有好几种原因(系统没送来 / 动作失败 /
+                    // 打进了中文输入法的候选框),光看注册成功分不出来。
+                    "hits": commands::shortcuts::shortcut_hits(),
                 }),
             );
             // Safari 修复的实际状态(失败原因最关键:权限/开关问题都体现在这里)
@@ -500,7 +511,23 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }
-            // 注册全局快捷键(与 Electron 版同口径:⌃⇧A 一定有,⌃⇧D 只有 macOS)
+            // 注册全局快捷键。
+            //
+            // - **macOS**:自己用事件监听实现(见 `native::hotkey`)。
+            //   系统的全局热键要求修饰键**一模一样**:手上多带一个 Fn/⌥ 就对不上,
+            //   按键没被吃掉 → 那个 D 就漏进了当前应用("多打出一个 D"),
+            //   同时动作也不执行(看起来就是"快捷键失灵")。
+            //   自己监听:匹配只看"有没有 ⌃⇧/⌘⇧",并把按键吃掉,被系统禁用还能重建。
+            // - **Windows**:用系统的全局热键(那边没有输入源切换这套打法,
+            //   ⌃⇧A 走同一条路)。
+            #[cfg(target_os = "macos")]
+            {
+                match nativecmd::hotkey::start(app.handle().clone()) {
+                    Ok(_) => nativecmd::hotkey::set_expected(true),
+                    Err(e) => eprintln!("[shortcut] 快捷键监听启动失败: {}", e),
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             register_global_shortcuts(app.handle());
             // macOS:菜单(⌘Q 退出 / 编辑菜单)与窗口层级(screen-saver)
             #[cfg(target_os = "macos")]
@@ -548,11 +575,11 @@ pub fn run() {
         });
 }
 
-/// 注册全局快捷键。
+/// 注册全局快捷键(系统的全局热键 —— 只有非 macOS 平台用)。
 ///
-/// 与 Electron 版 `registerShortcuts()` 同口径:
-/// - ⌃⇧A 触发「默认执行」—— 两个平台都有
-/// - ⌃⇧D 读剪贴板并键入 —— **只有 macOS**(Windows 没有输入源切换这套打法)
+/// macOS 走的是 `native::hotkey` 自己监听事件(匹配更宽松、能吃掉按键);
+/// 这里的实现给 Windows 用。
+#[cfg(not(target_os = "macos"))]
 fn register_global_shortcuts(app: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 

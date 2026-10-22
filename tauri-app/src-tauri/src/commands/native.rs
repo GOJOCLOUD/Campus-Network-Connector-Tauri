@@ -30,6 +30,11 @@ pub mod recording_stub;
 #[cfg(not(target_os = "macos"))]
 pub use recording_stub as rec;
 
+// 全局快捷键的**事件监听**只有 macOS 有(macOS 自己监听 ⇒ 匹配更宽松、
+// 能把按键吃掉,不会漏出多余的字符);其它平台用系统的全局热键。
+#[cfg(target_os = "macos")]
+pub mod hotkey;
+
 #[cfg(target_os = "macos")]
 use macos as imp;
 #[cfg(target_os = "windows")]
