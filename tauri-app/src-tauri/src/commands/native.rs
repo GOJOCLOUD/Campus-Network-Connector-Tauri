@@ -26,7 +26,7 @@ pub mod recording;
 pub use recording as rec;
 
 #[cfg(not(target_os = "macos"))]
-mod recording_stub;
+pub mod recording_stub;
 #[cfg(not(target_os = "macos"))]
 pub use recording_stub as rec;
 
