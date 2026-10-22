@@ -67,9 +67,18 @@ export default function Stepper({
       className="flex min-h-0 flex-1 flex-col items-stretch"
       {...rest}
     >
+      {/*
+        shrink-0:**不让卡片被父容器压扁**。
+        卡片是 flex 项,默认 flex-shrink:1;而卡片自己带 overflow-hidden,
+        它的自动最小尺寸(auto)会被算成 0 —— 于是窗口一旦比内容矮,
+        卡片就被压到窗口高度,内容被裁掉,量出来的底边又永远等于
+        "窗口底 - 8px",于是窗口一直长、内容一直缺(实测:卡片 440 被压成 272,
+        内容只剩 66/234)。
+        压扁就不压,让卡片保持内容高度、由窗口去贴合它。
+      */}
       <div
         data-panel-probe
-        className={`relative mx-auto flex w-full flex-col overflow-hidden ${stepCircleContainerClassName}`}
+        className={`relative mx-auto flex w-full shrink-0 flex-col overflow-hidden ${stepCircleContainerClassName}`}
         style={{
           maxWidth: 'var(--panel-max)',
           backgroundColor: 'var(--card-bg)',
@@ -174,10 +183,12 @@ function StepContentWrapper({
 
   return (
     <motion.div
-      // 高度上限用**像素**(--content-max),不用 vh:
-      // vh 跟着窗口高度走,窗口高度又由内容高度决定 → 两边互相追着跑,
-      // 内容被压扁、窗口越缩越小。用像素就和窗口大小彻底解耦了。
-      style={{ position: 'relative', overflowY: 'auto', maxHeight: 'var(--content-max)' }}
+      // **不给内容高度设上限**。
+      // Electron 版写死 65vh,是因为它的窗口是固定 640 高、内容超了只能滚动;
+      // Tauri 这边窗口会跟着内容长(见 tauri-bridge.js 的 fitWindow),
+      // 再加个上限就等于把后面的功能藏进滚动条里 —— 界面上就"少了东西"。
+      // 高度完全由内容决定:每个步骤该多高就多高,一个功能都不藏。
+      style={{ position: 'relative', overflowY: 'auto' }}
       animate={{ height: isCompleted ? 0 : parentHeight }}
       transition={{ type: 'spring', duration: 0.4 }}
       className={className}
