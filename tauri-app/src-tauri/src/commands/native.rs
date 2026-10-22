@@ -16,15 +16,19 @@ mod unsupported;
 
 // 录制(CGEventTap)只有 macOS 有;其它平台用占位实现,
 // 让命令照样存在、返回一句明确的"不支持"。
+//
+// **`rec` 是对外的统一入口**:macOS 指向真实现,其它平台指向占位实现。
+// 上层(命令层、运行自检)只认 `rec`,不直接碰 `recording` ——
+// 否则 Windows 上会因为模块名不一样而编译不过。
 #[cfg(target_os = "macos")]
 pub mod recording;
 #[cfg(target_os = "macos")]
-use recording as rec;
+pub use recording as rec;
 
 #[cfg(not(target_os = "macos"))]
 mod recording_stub;
 #[cfg(not(target_os = "macos"))]
-use recording_stub as rec;
+pub use recording_stub as rec;
 
 #[cfg(target_os = "macos")]
 use macos as imp;
