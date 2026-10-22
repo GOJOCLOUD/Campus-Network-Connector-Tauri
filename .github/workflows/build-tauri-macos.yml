@@ -34,6 +34,16 @@ jobs:
 
       # 参考库(glyph-db-48.crdb.gz)与页面守卫是**提交进仓库**的构建产物,
       # 这里不需要重建；要重建用 npm run build:reference-db / build:vendor。
+      #
+      # Rust 单元测试放在**打包之前**:跑不过就不发包。
+      # 这些测试盯的是"链路会不会又断一次"(守卫上报的字段名、注入脚本的字符串
+      # 字面量、混淆字体能不能整份还原)—— 之前 Rust 侧一个测试都没有,
+      # Safari 修复整条链断掉时没人发现(2026-10-22 那次就是)。
+      # 必须在 "Build frontend" 之后跑:tauri 的构建脚本会检查 frontendDist 在不在。
+      - name: Rust unit tests
+        working-directory: tauri-app/src-tauri
+        run: cargo test --lib
+
       - name: Build Tauri .app
         run: |
           cd tauri-app
