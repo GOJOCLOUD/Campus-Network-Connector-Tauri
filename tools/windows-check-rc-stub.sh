@@ -13,7 +13,15 @@
 # 只影响**检查**这一步:云端 CI 有真的资源编译器,产物不受影响。
 #
 # 用法:
-#   RC=$(pwd)/tools/windows-check-rc-stub.sh \
+#   ./tools/windows-check.sh
+#
+# (这个 RC 路径**必须给绝对路径**:编译 .rc 那步跑在 cargo 依赖的构建脚本里,
+#  工作目录在 ~/.cargo/registry 下,相对路径会解析到那里去 →
+#  "Couldn't execute ../../tools/... No such file or directory"。
+#  tools/windows-check.sh 已经把绝对路径算好了,直接用它。)
+#
+# 直接手动调用的话:
+#   RC="$(pwd)/tools/windows-check-rc-stub.sh" \
 #     cargo check --target x86_64-pc-windows-msvc
 #
 for a in "$@"; do
