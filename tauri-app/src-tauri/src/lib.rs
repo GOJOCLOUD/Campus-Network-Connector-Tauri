@@ -173,6 +173,7 @@ pub fn run() {
             nativecmd::send_key,
             nativecmd::get_current_input_source,
             nativecmd::select_input_source,
+            nativecmd::clipboard_read_text,
             safari_repair_check_now,
             safari_repair_set_enabled,
             safari_repair_get_status,

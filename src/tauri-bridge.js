@@ -201,8 +201,8 @@ function installTauriBridge() {
     : (/Macintosh|Mac OS X/i.test(ua) ? 'darwin' : 'darwin')
 
   window.cnc = {
-    // Clipboard（Tauri 版暂未接剪贴板，先给空串，界面不会崩）
-    clipboardReadText: notImplemented('clipboardReadText'),
+    // Clipboard（macOS 走 NSPasteboard；Windows 暂未实现，界面不会崩）
+    clipboardReadText: () => invoke('clipboard_read_text').catch(() => ''),
 
     // Window
     platform: platform,
@@ -250,7 +250,26 @@ function installTauriBridge() {
     // Playback（Tauri 版暂未移植回放）
     playFile: notImplemented('playFile'),
     playData: notImplemented('playData'),
-    pinyinInput: notImplemented('pinyinInput'),
+    // 拼音自动键入：与 Electron 版 pinyinType 同流程 ——
+    // 可选切到 ASCII 输入源 → 等 delaySeconds → 逐字键入
+    pinyinInput: async (text, delaySeconds, autoSwitchIme) => {
+      const value = text || '';
+      if (!value) return { status: 'success', message: '没有要输入的内容' };
+      if (autoSwitchIme) {
+        try {
+          const cfg = await invoke('get_settings');
+          const asciiId = cfg && cfg.ascii_id;
+          if (asciiId) await invoke('select_input_source', { sourceId: asciiId });
+        } catch (_) {
+          /* 切不动就按当前输入源继续 */
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      const wait = Math.max(0, Number(delaySeconds || 3)) * 1000;
+      await new Promise((r) => setTimeout(r, wait));
+      await invoke('send_text', { text: value });
+      return { status: 'success', message: `将在 ${delaySeconds || 3} 秒后开始输入` };
+    },
 
     // Settings
     settings: {
