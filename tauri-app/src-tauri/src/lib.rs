@@ -65,6 +65,9 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "enabled": safari::repair::is_enabled(),
                     "injected": safari::repair::is_injected(),
                     "lastError": safari::repair::last_error(),
+                    // 映射没建起来的原因(取字体失败/分析失败/映射为空)——
+                    // 这些分支不报错,只看"enabled"会以为一切正常。
+                    "mapping": safari::repair::mapping_note(),
                     "poll": safari::repair::poll_diagnostics(),
                 }),
             );
