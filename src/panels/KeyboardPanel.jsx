@@ -13,10 +13,42 @@ export default function KeyboardPanel({
   featureList,
   featureStatus,
   onToggleFeature,
+  showAccessibilityBadge,
+  accessibilityTrusted,
+  onOpenAccessibilitySettings,
 }) {
+  // 「辅助功能」授权状态:一个小问号就够,不做成占一整条的大横幅。
+  // 红=还不能用(模拟点击/回放/键入发不出去),绿=可以用,灰=状态未知。
+  // **Windows 没有「辅助功能」**(SendInput 不需要授权)→ 那边根本不显示这个小问号。
+  const trusted = accessibilityTrusted === true
+  const unknown = accessibilityTrusted === null || accessibilityTrusted === undefined
+  const badgeClass = unknown
+    ? 'text-gray-400 border-gray-300 bg-gray-50'
+    : trusted
+      ? 'text-emerald-600 border-emerald-300 bg-emerald-50'
+      : 'text-red-600 border-red-300 bg-red-50'
+  const badgeTitle = unknown
+    ? '正在确认系统授权状态'
+    : trusted
+      ? '「辅助功能」已授权:模拟点击 / 回放 / 键入都能发出去'
+      : '没有「辅助功能」权限:模拟点击 / 回放 / 键入发不出去(点我去系统设置打开)'
+
   return (
     <>
-      <h2>键盘输入</h2>
+      <div className="flex items-center justify-between gap-2">
+        <h2>键盘输入</h2>
+        {showAccessibilityBadge !== false && (
+          <button
+            type="button"
+            onClick={() => onOpenAccessibilitySettings?.()}
+            title={badgeTitle}
+            aria-label={badgeTitle}
+            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-bold leading-none transition hover:opacity-80 ${badgeClass}`}
+          >
+            ?
+          </button>
+        )}
+      </div>
       {<FeatureToggles featureList={featureList} featureStatus={featureStatus} onToggle={onToggleFeature} />}
       <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-2">输入完成前不要尝试操作电脑，否则可能导致电脑死机（强制重启可以解决）</p>
       <div className="relative w-full mb-3">

@@ -110,6 +110,47 @@ function installTauriBridge() {
   writeDiag()
   setInterval(writeDiag, 3000)
 
+  // ── 窗口贴合内容 ───────────────────────────────────────────────
+  // 窗口不该比"看得见的白色面板"大一大圈:多出来的那圈虽然透明,但
+  // **照样吃鼠标事件**(macOS 的透明窗口整块矩形都收事件),下面的 App
+  // 就点不动了,还白占着桌面。
+  //
+  // 高度以**卡片底边**为准(不是窗口高度,也不是根容器高度):卡片是内容高度,
+  // 与窗口高度无关,所以收窗口不会引发"收窄→测量变→再收窄"的抖动。
+  // 宽度不动 —— 卡片宽度是定死的,动宽度会互相追着跑。
+  const fitWindow = async () => {
+    const card = document.querySelector('[data-panel-probe]')
+    if (!card) return
+    const rect = card.getBoundingClientRect()
+    if (!rect || !rect.height) return
+    // 卡片底边 + 一点下边距(根容器的 padding),别让面板贴到窗口边缘
+    const want = Math.ceil(rect.bottom + 8)
+    try {
+      await invoke('window_fit_to_content', { height: want })
+    } catch (e) {
+      // 收窗口失败不该影响界面:只记一笔
+      console.warn('[fit] 窗口贴合失败', e)
+    }
+  }
+  // 卡片尺寸变了(换步骤、文本变多、窗口被用户改过)都要重新贴合
+  if (typeof ResizeObserver === 'function') {
+    let pending = 0
+    const schedule = () => {
+      if (pending) return
+      pending = requestAnimationFrame(() => {
+        pending = 0
+        fitWindow()
+      })
+    }
+    const observer = new ResizeObserver(schedule)
+    const card = document.querySelector('[data-panel-probe]')
+    if (card) observer.observe(card)
+    window.addEventListener('resize', schedule)
+  }
+  // 首帧之后也贴合一次:首帧时卡片可能还没量出高度
+  setTimeout(fitWindow, 60)
+  setTimeout(fitWindow, 400)
+
   // 平台标识:界面上 `cnc.platform` 在模块加载时就被同步读取
   // (isMac / isWindows 是模块级常量),而 Tauri 的 IPC 是异步的,
   // 没法等一次 invoke 再赋值 —— 所以这里用 WebView 的 UA 判断:
@@ -128,6 +169,10 @@ function installTauriBridge() {
     quit: () => invoke('window_quit'),
     minimize: () => invoke('window_minimize'),
     maximize: () => invoke('window_maximize'),
+    // 窗口贴合内容(见上面 fitWindow 的说明)
+    fitWindowToContent: () => fitWindow(),
+    // 打开「系统设置 → 隐私与安全性 → 辅助功能」
+    openAccessibilitySettings: () => invoke('open_accessibility_settings'),
 
     // Activation
     getActivationSnapshot: () => invoke('get_activation_snapshot'),

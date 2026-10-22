@@ -123,6 +123,52 @@ fn window_maximize(app: tauri::AppHandle) {
     }
 }
 
+/// 窗口贴合内容:把窗口**高度**收到前端报上来的内容实际高度。
+///
+/// 为什么要有这条:窗口比可见面板大一圈时,那一圈**看不见的地方照样吃鼠标事件**
+/// (macOS 的透明窗口整块矩形都收事件,下面的 App 就点不动了),也白占着桌面。
+/// 收窄之后,屏幕上就只剩"一块浮着的白色面板"——和 Electron 版的观感一致。
+///
+/// **只调高度**:宽度由布局定死(卡片 448px),动宽度会和前端测量互相追着跑
+/// (窗口变窄 → 卡片变窄 → 再报一个更窄的宽度 → 无限缩小)。
+///
+/// 差值小于 2px 就不动,免得和前端的测量抖动互相打转。
+#[tauri::command]
+fn window_fit_to_content(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    if !height.is_finite() || height <= 0.0 {
+        return Err("高度不合法".to_string());
+    }
+    let w = app.get_webview_window("main").ok_or("找不到主窗口")?;
+    let scale = w.scale_factor().map_err(|e| e.to_string())?;
+    let cur = w.inner_size().map_err(|e| e.to_string())?;
+    let cur_logical = cur.height as f64 / scale;
+    let want = height.round();
+    if (want - cur_logical).abs() < 2.0 {
+        return Ok(());
+    }
+    let size = tauri::LogicalSize::new(cur.width as f64 / scale, want);
+    w.set_size(size).map_err(|e| e.to_string())
+}
+
+/// 打开「系统设置 → 隐私与安全性 → 辅助功能」。
+///
+/// 界面上的小问号点一下就该把人送到能改的地方,而不是让人自己找路径。
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开系统设置失败:{}", e))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("只有 macOS 有「辅助功能」设置页".to_string())
+    }
+}
+
 /// Safari 复制修复 —— 只有 macOS 有(靠 Apple Events)。
 /// 命令照样注册,Windows 上明确报"不支持",而不是让前端报"命令不存在"。
 #[tauri::command]
@@ -206,6 +252,8 @@ pub fn run() {
             window_quit,
             window_minimize,
             window_maximize,
+            window_fit_to_content,
+            open_accessibility_settings,
             appcmd::get_activation_snapshot,
             appcmd::start_trial,
             appcmd::save_license,
