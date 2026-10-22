@@ -85,6 +85,20 @@ function installTauriBridge() {
     } catch (e) {
       recordingFiles = null
     }
+    // 剪贴板:接口有没有被接到原生实现上、原生读得到东西吗。
+    // **只探一次** —— 每 3 秒读一次剪贴板既浪费也不礼貌。
+    if (!window.__clipboardProbed) {
+      window.__clipboardProbed = true
+      try {
+        const t = await invoke('clipboard_read_text')
+        window.__clipboardProbe = {
+          patched: !!window.__clipboardPatched,
+          nativeLength: typeof t === 'string' ? t.length : null,
+        }
+      } catch (e) {
+        window.__clipboardProbe = { patched: !!window.__clipboardPatched, nativeLength: null }
+      }
+    }
     try {
       // 原生模块状态:顺手探一下**新命令**能不能从界面这一侧调通。
       // (命令没注册 / 名字对不上 → 这里会记下错误,而不是界面上一片空白)
@@ -122,6 +136,7 @@ function installTauriBridge() {
           cardShadow: cardCs ? cardCs.boxShadow : null,
           contentMetrics: contentMetrics,
           recordingFiles: recordingFiles,
+          clipboard: window.__clipboardProbe || null,
           bodyBg: getComputedStyle(document.body).backgroundColor,
           rootBg: getComputedStyle(document.getElementById('root')).backgroundColor,
           dragProbe: dragProbe,
@@ -203,6 +218,53 @@ function installTauriBridge() {
   const platform = /Windows/i.test(ua)
     ? 'win32'
     : (/Macintosh|Mac OS X/i.test(ua) ? 'darwin' : 'darwin')
+
+  // ── 剪贴板 API:接到原生的 NSPasteboard 上 ──────────────────────
+  //
+  // 界面里两处用的是**浏览器**的剪贴板 API(Electron 版逐字搬过来的):
+  //   · ⌃⇧D 剪贴板直入 → navigator.clipboard.readText()
+  //   · 「复制 UUID」    → navigator.clipboard.writeText()
+  // Electron 里这两个是能用的;**WKWebView 里不可靠** —— 读要么直接失败,
+  // 要么每次弹「允许粘贴」,于是窗口内那条 ⌃⇧D 就"按了没反应"。
+  //
+  // 这里把浏览器 API 换成原生实现(NSPasteboard / NSPasteboardTypeString):
+  // **界面代码一个字都不用改**(与 Electron 逐字相同,见 ADR-0013),
+  // 行为也回到 Electron 那边"静默读/写系统剪贴板"的样子。
+  //
+  // Windows 不装这个补丁:那边原生读剪贴板还没实现,
+  // 浏览器 API 留着反而能用(WebView2 的行为和 Electron 一致)。
+  if (platform === 'darwin') {
+    try {
+      const nativeClipboard = {
+        readText: async () => {
+          const t = await invoke('clipboard_read_text')
+          return typeof t === 'string' ? t : ''
+        },
+        writeText: async (text) => {
+          await invoke('clipboard_write_text', { text: String(text ?? '') })
+        },
+      }
+      if (!navigator.clipboard) {
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: nativeClipboard,
+        })
+      } else {
+        // 已有 clipboard 对象:把两个方法换成原生的
+        Object.defineProperty(navigator.clipboard, 'readText', {
+          configurable: true,
+          value: nativeClipboard.readText,
+        })
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          configurable: true,
+          value: nativeClipboard.writeText,
+        })
+      }
+      window.__clipboardPatched = true
+    } catch (e) {
+      console.warn('[clipboard] 接管剪贴板 API 失败', e)
+    }
+  }
 
   window.cnc = {
     // Clipboard（macOS 走 NSPasteboard；Windows 暂未实现，界面不会崩）
