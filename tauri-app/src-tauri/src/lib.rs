@@ -133,6 +133,7 @@ fn safari_repair_check_now(app: tauri::AppHandle) -> Result<serde_json::Value, S
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app;
         Err("Safari 复制修复只有 macOS 有".to_string())
     }
 }
