@@ -12,6 +12,38 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
+// ── 辅助功能权限 ─────────────────────────────────────────
+//
+// 发合成点击/按键(CGEventPost)需要 macOS 的「辅助功能」权限。
+// **没有权限时系统会静默丢弃事件**:命令照样返回 true,屏幕上却什么都没发生。
+// 所以必须把这个状态查出来报到界面上,免得用户以为程序坏了
+// (Electron 版就是没报 → 失败是"静默"的)。
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
+/// 当前进程是否被授予「辅助功能」权限。
+pub fn accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// 发合成事件前的权限闸门。
+///
+/// 没有「辅助功能」权限时,`CGEventPost` 会被系统**静默丢弃**:
+/// 命令返回成功,屏幕上却什么都没发生 —— 用户只会觉得"软件坏了"。
+/// 所以这里直接报错,把原因带回去(界面会显示出来)。
+fn require_accessibility(what: &str) -> Result<(), String> {
+    if accessibility_trusted() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}需要「辅助功能」权限:系统设置 → 隐私与安全性 → 辅助功能 → 勾选本应用(改完要重开软件)",
+        what
+    ))
+}
+
 fn event_source() -> Result<CGEventSource, String> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| "创建事件源失败(系统可能未授权辅助功能)".to_string())
@@ -19,6 +51,7 @@ fn event_source() -> Result<CGEventSource, String> {
 
 /// 鼠标点击(左键按下+抬起)。
 pub fn mouse_click(x: f64, y: f64) -> Result<bool, String> {
+    require_accessibility("模拟点击")?;
     let point = CGPoint::new(x, y);
     let down = CGEvent::new_mouse_event(
         event_source()?,
@@ -51,6 +84,7 @@ pub fn send_text(text: String) -> Result<bool, String> {
     if text.is_empty() {
         return Ok(true);
     }
+    require_accessibility("键入文本")?;
     for ch in text.chars() {
         let mut buf = [0u16; 2];
         let mut utf16 = [0u16; 2];
@@ -77,6 +111,7 @@ pub fn send_text(text: String) -> Result<bool, String> {
 /// flags 位:1=shift 2=control 4=option/alt 8=command
 /// keycode 是 **macOS 虚拟键码**(CGKeyCode)。
 pub fn send_key(key_code: u16, flags: u32) -> Result<bool, String> {
+    require_accessibility("发送按键")?;
     let mut cg_flags = CGEventFlags::empty();
     if flags & 1 != 0 {
         cg_flags |= CGEventFlags::CGEventFlagShift;

@@ -1,11 +1,13 @@
 /**
- * 界面裁剪自检 —— 验证「Windows 版没有快捷输入、没有录制」这件事**真的发生在界面上**。
+ * 界面裁剪自检 —— 验证「Windows 版不做录制、但保留拼音输入」这件事**真的发生在界面上**。
  *
  * 只看代码不够:平台判断写错了(或者判断的是构建期常量而不是运行时平台),
- * 界面照样会把两个不该出现的步骤渲染出来。所以这里用真实浏览器跑一遍:
+ * 界面照样会把不该出现的步骤渲染出来。所以这里用真实浏览器跑一遍:
  *
  *   - 模拟 darwin → 4 个步骤(激活 / 默认执行 / 模拟点击 / 键盘输入)
- *   - 模拟 win32  → 2 个步骤(激活 / 默认执行),且界面上没有「模拟点击」「键盘输入」
+ *   - 模拟 win32  → 3 个步骤(激活 / 默认执行 / 键盘输入),且界面上没有「模拟点击」
+ *
+ * 口径见 ADR-0012:Windows 保留拼音自动键入,不保留录制。
  *
  *   node tools/verify/verify-ui-platforms.cjs
  */
@@ -187,16 +189,16 @@ async function probe(page) {
       await page.close();
     }
 
-    // ── Windows:两个步骤,且没有快捷输入/录制 ──
+    // ── Windows:三个步骤(激活 / 默认执行 / 键盘输入),没有录制 ──
+    // 按 ADR-0012:Windows 保留**拼音自动键入**,不保留**录制**。
     {
       const page = await browser.newPage();
       await page.evaluateOnNewDocument(stub('win32'));
       await page.goto(base, { waitUntil: 'networkidle0' });
       await new Promise((r) => setTimeout(r, 600));
       const s = await probe(page);
-      check('Windows 只渲染 2 个步骤', s.steps === 2, `实际 ${s.steps}`);
-      check('Windows 界面上没有「模拟点击」', !s.text.includes('模拟点击'));
-      check('Windows 界面上没有「键盘输入」', !s.text.includes('键盘输入'));
+      check('Windows 渲染 3 个步骤', s.steps === 3, `实际 ${s.steps}`);
+      check('Windows 界面上没有「模拟点击」(录制不做)', !s.text.includes('模拟点击'));
       check('Windows 保留「默认执行」', s.text.includes('默认执行'));
       check('Windows 保留「选择录制」', s.text.includes('选择录制'));
       check('Windows 保留「管理」入口(文件管理不能跟着录制界面一起没掉)', s.text.includes('管理'));
@@ -216,6 +218,20 @@ async function probe(page) {
       await new Promise((r) => setTimeout(r, 400));
       const back = await probe(page);
       check('Windows 点「返回」回到执行面板', back.text.includes('默认执行') && !back.text.includes('管理录制文件'));
+
+      // 第 3 步是「键盘输入」(拼音自动键入)—— 得点进去才看得到文案
+      await page.evaluate(() => {
+        const circles = [...document.querySelectorAll('div')]
+          .filter((d) => typeof d.className === 'string'
+            && d.className.includes('h-8') && d.className.includes('w-8')
+            && d.className.includes('rounded-full'));
+        const target = circles[2];
+        if (target && target.parentElement) target.parentElement.click();
+      });
+      await new Promise((r) => setTimeout(r, 500));
+      const winStep3 = await probe(page);
+      check('Windows 第 3 步是「键盘输入」(拼音自动键入)', winStep3.text.includes('键盘输入'));
+      check('Windows 第 3 步有「开始输入」按钮', winStep3.text.includes('开始输入'));
       await page.close();
     }
   } finally {

@@ -595,6 +595,13 @@ function App() {
           请重新安装最新版安装包。
         </div>
       )}
+      {nativeStatus && nativeStatus.ok !== false && nativeStatus.accessibilityTrusted === false && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 bg-amber-600 text-white text-xs px-4 py-2 shadow leading-relaxed">
+          未获得「辅助功能」权限 —— 模拟点击、回放、拼音自动键入都发不出去（事件会被系统静默丢弃，界面却显示成功）。
+          请到「系统设置 → 隐私与安全性 → 辅助功能」勾选本应用，然后重新打开本软件。
+          （只「录制」不需要这个权限，可以先用。）
+        </div>
+      )}
       <Stepper
         key={isActivated ? 'active' : 'inactive'}
         initialStep={isActivated ? 2 : 1}
@@ -629,19 +636,19 @@ function App() {
           <DefaultExecutePanel {...defaultExecutePanelProps} />
         </Step>
 
-        {/* 以下两步是 macOS 专属:录制要事件监听,快捷输入要切换输入源。
-            Windows 版到「默认执行」为止,少两个界面但功能不缺。 */}
+        {/* 录制要事件监听(CGEventTap),只有 macOS 有 → Windows 不显示这一页。
+            键盘输入(拼音自动键入)两边都要有:
+            macOS 靠 TIS 切输入源,Windows 直接用 Unicode 逐字键入,都能用
+            (见 ADR-0012:Windows 保留拼音输入,不保留录制)。 */}
         {!isWindows && (
           <Step>
             <ClickPanel {...clickPanelProps} />
           </Step>
         )}
 
-        {!isWindows && (
-          <Step>
-            <KeyboardPanel {...keyboardPanelProps} />
-          </Step>
-        )}
+        <Step>
+          <KeyboardPanel {...keyboardPanelProps} />
+        </Step>
       </Stepper>
 
 <RenameDialog {...renameDialogProps} />

@@ -40,11 +40,23 @@ getrandom = "0.2"
 # 代码路径用它 —— 所以干脆不要这个特性,两个平台都干净。
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+# core-foundation 0.10 没有把 kCFRunLoopDefaultMode 导出到安全 API,
+# 但录制(CGEventTap)要把 mach port source 挂到 run loop 上 → 直接用 sys 层常量。
+core-foundation-sys = "0.8"
 core-graphics = "0.24"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSScreen", "NSPasteboard", "NSEvent", "NSAppleScriptExtensions", "NSApplication", "NSMenu", "NSView", "NSGraphics", "NSResponder"] }
 objc2-carbon = "0.3"
+# keepalive 每 3 分钟发一次 HTTPS 请求(与 Electron 版 main.js 的 pingNetwork 同口径)。
+# Windows 线不做 keepalive(ADR-0012),所以这个依赖只挂在 macOS 上,Windows 包不带它。
+# TLS 后端是 rustls + ring(不是 aws-lc-rs)→ 不需要 cmake / C 编译器,CI 干净。
+ureq = { version = "2", features = ["tls"] }
+
+# 集成测试要直接用 core-graphics 建自己的事件监听(诊断 tap 是否真能收到系统事件),
+# 所以这里再声明一份 dev 依赖。
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+core-graphics = "0.24"
 
 # ── Windows 专属 ───────────────────────────────────────────
 # 鼠标/键盘走 SendInput(与 Electron 版的 win-input 同一套约定:

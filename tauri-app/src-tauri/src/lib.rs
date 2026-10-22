@@ -45,6 +45,31 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "poll": safari::repair::poll_diagnostics(),
                 }),
             );
+            // 原生能力状态:能不能发合成点击/按键(辅助功能权限)
+            obj.insert(
+                "native".to_string(),
+                serde_json::json!({
+                    "accessibilityTrusted": commands::native::accessibility_trusted(),
+                    "recording": commands::native::recording::is_recording(),
+                    "recordingClicks": commands::native::recording::get_recording_clicks().len(),
+                    "tapFailed": commands::native::recording::tap_failed(),
+                }),
+            );
+            // 最近一次回放:执行了几条、为什么没执行
+            obj.insert(
+                "playback".to_string(),
+                match commands::play::last_status() {
+                    Some(st) => serde_json::json!({
+                        "file": st.file,
+                        "clicks": st.clicks,
+                        "executed": st.executed,
+                        "startedAtMs": st.started_at_ms,
+                        "finishedAtMs": st.finished_at_ms,
+                        "error": st.error,
+                    }),
+                    None => serde_json::json!(null),
+                },
+            );
         }
         let _ = std::fs::write(
             dir.join("diag.json"),
@@ -144,6 +169,34 @@ fn safari_repair_get_status() -> serde_json::Value {
     }
 }
 
+/// keepalive 开关状态(Electron 版默认 true)。
+#[tauri::command]
+fn keepalive_get_status(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(commands::keepalive::is_enabled(&app))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("keepalive 只有 macOS 实现".to_string())
+    }
+}
+
+/// 改 keepalive 开关(落盘)。
+#[tauri::command]
+fn keepalive_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(commands::keepalive::set_enabled(&app, enabled))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, enabled);
+        Err("keepalive 只有 macOS 实现".to_string())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -174,6 +227,16 @@ pub fn run() {
             nativecmd::get_current_input_source,
             nativecmd::select_input_source,
             nativecmd::clipboard_read_text,
+            nativecmd::start_recording,
+            nativecmd::stop_recording,
+            nativecmd::get_recording_clicks,
+            nativecmd::clear_recording_clicks,
+            nativecmd::is_recording,
+            nativecmd::tap_failed,
+            commands::play::play_file,
+            commands::play::play_data,
+            keepalive_get_status,
+            keepalive_set_enabled,
             safari_repair_check_now,
             safari_repair_set_enabled,
             safari_repair_get_status,
@@ -187,6 +250,8 @@ pub fn run() {
                 if appcmd::feature_enabled(app.handle(), "safari-repair") {
                     safari::repair::set_enabled(true);
                 }
+                // keepalive:每 3 分钟一次 HTTPS 保活(Electron 版同口径)
+                commands::keepalive::start(app.handle().clone());
             }
             // macOS:窗口不是 key window 时,`performDragOperation`(Tauri 的拖窗实现)
             // 会**直接失效** → 表现为"拖不动"。启动时主动抢一次焦点即可。
