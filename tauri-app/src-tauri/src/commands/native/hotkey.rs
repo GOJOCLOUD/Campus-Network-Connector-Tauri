@@ -27,7 +27,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::runloop::CFRunLoop;
 use core_foundation_sys::runloop::kCFRunLoopDefaultMode;
@@ -58,7 +58,6 @@ impl Hotkey {
     }
 }
 
-#[derive(Default)]
 struct TapState {
     /// tap 是否活着
     alive: bool,
@@ -66,6 +65,42 @@ struct TapState {
     error: String,
     /// 已经吞掉 keydown 的键码 —— 对应的 keyup 也要吞,不然应用会收到"没有 keydown 的 keyup"
     pending_keyups: Vec<i64>,
+    /// **当前按住的修饰键**(由 `FlagsChanged` 累积而来)。
+    ///
+    /// 为什么不能只看主键 keydown 自带的 flags:那只是"事件到达那一刻"的快照。
+    /// 三个键按下有先后、有偏差时,主键的事件完全可能**先于**修饰键的
+    /// `FlagsChanged` 到 —— 那一刻 flags 还是空的 ⇒ 匹配不上 ⇒ 那一键
+    /// 还漏给前台应用(用户看到"多打出一个 D")。
+    /// 跟踪状态就没有顺序问题。
+    modifiers: CGEventFlags,
+    /// **当前按住的非修饰键**(+ 按下的时刻)。
+    ///
+    /// 有了它,修饰键**后补齐**时能回头把先按下的那个键认成快捷键
+    /// ("先按 A,再补 ⌃⇧"也能触发)。
+    ///
+    /// 记时刻是为了**只认"刚刚"按下的那个键** —— 否则"按住 A 打字好几秒,
+    /// 后来又按了 ⌃⇧"会被误判成快捷键,白白触发一次回放。
+    pressed_keys: Vec<(i64, Instant)>,
+}
+
+/// 回头认的**时间窗**:主键按下后多久之内补齐修饰键还算数。
+///
+/// 两秒足够覆盖"三个键连着按"(人手的手指间隔远小于这个量级)。
+const RECOGNIZE_WINDOW: Duration = Duration::from_millis(2000);
+
+/// "当前按住的键"最多记多少个(兜底:万一漏了 keyup,不至于无限涨)。
+const MAX_PRESSED_KEYS: usize = 16;
+
+impl Default for TapState {
+    fn default() -> Self {
+        TapState {
+            alive: false,
+            error: String::new(),
+            pending_keyups: Vec::new(),
+            modifiers: CGEventFlags::empty(),
+            pressed_keys: Vec::new(),
+        }
+    }
 }
 
 /// tap 的状态(运行自检用)。
@@ -166,12 +201,35 @@ fn match_hotkey_raw(keycode: i64, flags: CGEventFlags) -> Option<Hotkey> {
     }
 }
 
-/// 事件是不是我们要的组合键。
-fn match_hotkey(event: &CGEvent) -> Option<Hotkey> {
-    match_hotkey_raw(
-        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-        event.get_flags(),
-    )
+/// **有效**的修饰键 = 自己跟踪到的 ∪ 事件自带的。
+///
+/// 为什么取并集:
+/// - **跟踪到的**(`FlagsChanged` 累积)⇒ 解决"按下有先后、有偏差"的问题;
+/// - **事件自带的**⇒ 覆盖"App 启动之前用户就已经按着修饰键"的情况
+///   (那个 `FlagsChanged` 我们根本没收到,跟踪不到)。
+///
+/// 两者取并集,**按键顺序就不再是问题**。
+fn effective_modifiers(tracked: CGEventFlags, from_event: CGEventFlags) -> CGEventFlags {
+    tracked | from_event
+}
+
+/// 已经按住的键里,有没有哪个**按现在的修饰键**凑成了快捷键。
+///
+/// 这是"顺序无关"的关键:修饰键**后补齐**时,回头把先按下的那个键认出来。
+/// 返回 `(键码, 命中的快捷键)` —— 键码要留着,它的 keyup 也得吞。
+///
+/// `window` 是**时间窗**:只有"刚刚"(窗口内)按下的键才算 ——
+/// 防止"按住 A 打字半分钟,后来按了 ⌃⇧"被误判成快捷键。
+fn find_pending_hotkey(
+    pressed: &[(i64, Instant)],
+    modifiers: CGEventFlags,
+    now: Instant,
+    window: Duration,
+) -> Option<(i64, Hotkey)> {
+    pressed
+        .iter()
+        .filter(|(_, at)| now.duration_since(*at) <= window)
+        .find_map(|(keycode, _)| match_hotkey_raw(*keycode, modifiers).map(|hk| (*keycode, hk)))
 }
 
 /// 启动快捷键监听(独立线程 + 自己的 run loop,和录制那一套一样)。
@@ -232,6 +290,37 @@ pub fn start(app: tauri::AppHandle) -> Result<bool, String> {
     }
 }
 
+/// 命中之后:执行动作 + 记一笔。
+///
+/// ⚠️ 动作**另起线程**跑:tap 回调里不能做慢活,
+/// 超时系统会直接把这个 tap 关掉(快捷键就间歇性失灵了)。
+fn fire_hotkey(hotkey: Hotkey, app: &tauri::AppHandle, flags: u64) {
+    if diag_mode() {
+        // 自检模式:只记命中,**不执行**真动作
+        // (回放录制文件会在用户屏幕上乱点,自检不能有那种副作用)
+        crate::commands::shortcuts::record_shortcut_hit_detail(
+            hotkey.label(),
+            "命中(自检模式,没执行动作)",
+            Some(flags),
+        );
+        return;
+    }
+    let app = app.clone();
+    thread::spawn(move || match hotkey {
+        Hotkey::Execute => {
+            let _ = crate::commands::shortcuts::trigger_default_execute(&app);
+        }
+        Hotkey::Paste => {
+            let _ = crate::commands::shortcuts::trigger_pinyin_from_clipboard(&app);
+        }
+    });
+    crate::commands::shortcuts::record_shortcut_hit_detail(
+        hotkey.label(),
+        "命中(按键已吞掉)",
+        Some(flags),
+    );
+}
+
 /// 建 tap(带回调)。
 fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
     CGEventTap::new(
@@ -241,7 +330,13 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
         // 只有主动 tap 才能做到"按键不漏进别的应用"(系统热键是系统替你吞,
         // 一旦匹配不上就漏出去了)。主动 tap 需要「辅助功能」权限 —— 本应用有。
         CGEventTapOptions::Default,
-        vec![CGEventType::KeyDown, CGEventType::KeyUp],
+        // `FlagsChanged` 也要听:每次修饰键按下/松开都会发它。
+        // **靠它跟踪修饰键状态,才能做到"按键顺序无关"**(见 `effective_modifiers`)。
+        vec![
+            CGEventType::KeyDown,
+            CGEventType::KeyUp,
+            CGEventType::FlagsChanged,
+        ],
         move |_proxy, etype, event| {
             match etype {
                 CGEventType::KeyDown => {
@@ -257,42 +352,31 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                     }
                     let keycode =
                         event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                    if let Some(hotkey) = match_hotkey(event) {
-                        // 记住 keyup 也要吞
-                        if let Ok(mut s) = state().lock() {
+                    let event_flags = event.get_flags();
+                    // 用**跟踪到的**修饰键 ∪ 事件自带的来判定 ⇒ 顺序无关。
+                    let (hotkey, effective) = {
+                        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+                        if !s.pressed_keys.iter().any(|(k, _)| *k == keycode) {
+                            s.pressed_keys.push((keycode, Instant::now()));
+                            if s.pressed_keys.len() > MAX_PRESSED_KEYS {
+                                s.pressed_keys.remove(0);
+                            }
+                        }
+                        let effective = effective_modifiers(s.modifiers, event_flags);
+                        let hotkey = match_hotkey_raw(keycode, effective);
+                        if hotkey.is_some() {
+                            // 记住 keyup 也要吞
                             s.pending_keyups.push(keycode);
+                            // 已经触发过了 ⇒ 从"正按着"里拿掉,
+                            // 免得修饰键再变一次时**重复触发**。
+                            s.pressed_keys.retain(|(k, _)| *k != keycode);
                         }
-                        // 事件的标志位一起记下来:下次再出"什么事件被当成了快捷键",
+                        (hotkey, effective)
+                    };
+                    if let Some(hotkey) = hotkey {
+                        // 标志位一起记下来:下次再出"什么事件被当成了快捷键",
                         // 不用再靠猜(2026-10-23 那次事故就靠它定位到了 tap 回调)。
-                        let flags = event.get_flags().bits();
-                        if diag_mode() {
-                            // 自检模式:只记命中,**不执行**真动作
-                            // (回放录制文件会在用户屏幕上乱点,自检不能有那种副作用)
-                            crate::commands::shortcuts::record_shortcut_hit_detail(
-                                hotkey.label(),
-                                "命中(自检模式,没执行动作)",
-                                Some(flags as u64),
-                            );
-                            // 自检模式下也不放行 —— 否则"自检按一下"本身就会
-                            // 往前台漏一个按键(这正是 T0 事故的起点)。
-                            return swallow(event);
-                        }
-                        // 动作另起线程跑:tap 回调里不能做慢活,
-                        // 超时系统会直接把这个 tap 关掉。
-                        let app = app.clone();
-                        thread::spawn(move || match hotkey {
-                            Hotkey::Execute => {
-                                let _ = crate::commands::shortcuts::trigger_default_execute(&app);
-                            }
-                            Hotkey::Paste => {
-                                let _ = crate::commands::shortcuts::trigger_pinyin_from_clipboard(&app);
-                            }
-                        });
-                        crate::commands::shortcuts::record_shortcut_hit_detail(
-                            hotkey.label(),
-                            "命中(按键已吞掉)",
-                            Some(flags as u64),
-                        );
+                        fire_hotkey(hotkey, &app, effective.bits());
                         // **真正吞掉这个按键** ⇒ 别的应用收不到,不会多打出 D。
                         //
                         // ⚠️ 注意:返回 `None` 在 core-graphics 里是**放行**,
@@ -307,21 +391,47 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                         event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                     // 配套的 keyup 也要吞 —— 否则别的应用会收到"没有 keydown 的 keyup"。
                     let swallow_it = {
-                        if let Ok(mut s) = state().lock() {
-                            match s.pending_keyups.iter().position(|k| *k == keycode) {
-                                Some(pos) => {
-                                    s.pending_keyups.remove(pos);
-                                    true
-                                }
-                                None => false,
+                        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+                        // 这个键不再"按着"了
+                        s.pressed_keys.retain(|(k, _)| *k != keycode);
+                        match s.pending_keyups.iter().position(|k| *k == keycode) {
+                            Some(pos) => {
+                                s.pending_keyups.remove(pos);
+                                true
                             }
-                        } else {
-                            false
+                            None => false,
                         }
                     };
                     if swallow_it {
                         return swallow(event);
                     }
+                    None
+                }
+                // 修饰键变了:更新状态,并**回头看**已经按下的键 ——
+                // 这就是"顺序无关"的关键(先按 A、再补 ⌃⇧ 也能触发)。
+                CGEventType::FlagsChanged => {
+                    let flags = event.get_flags();
+                    let found = {
+                        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+                        s.modifiers = flags;
+                        let found = find_pending_hotkey(
+                            &s.pressed_keys,
+                            flags,
+                            Instant::now(),
+                            RECOGNIZE_WINDOW,
+                        );
+                        if let Some((keycode, _)) = found {
+                            // 已经触发过了 ⇒ 从"正按着"里拿掉,避免重复触发;
+                            // 它的 keyup 也要吞。
+                            s.pressed_keys.retain(|(k, _)| *k != keycode);
+                            s.pending_keyups.push(keycode);
+                        }
+                        found
+                    };
+                    if let Some((_, hotkey)) = found {
+                        fire_hotkey(hotkey, &app, flags.bits());
+                    }
+                    // `FlagsChanged` 本身不是按键,不用吞。
                     None
                 }
                 // 系统把 tap 关了(超时/用户输入):退出 run loop,外层重建
@@ -453,5 +563,63 @@ mod tests {
                 keycode
             );
         }
+    }
+
+    /// **顺序无关**:主键先按下、修饰键后补齐 —— 也要认成快捷键。
+    ///
+    /// 这就是用户说的「非得三个同时一起按」的解药:
+    /// 三个键按下的先后顺序、人手造成的微小偏差,都不再影响触发。
+    #[test]
+    fn 修饰键后补齐也能触发() {
+        let now = Instant::now();
+        // 先按下了 A(那一刻修饰键还没到位)
+        let pressed = vec![(KEY_A, now)];
+        // 只补上了 Control —— 还不够(缺 Shift)
+        assert_eq!(
+            find_pending_hotkey(&pressed, CTRL, now, RECOGNIZE_WINDOW),
+            None
+        );
+        // 补上 Shift ⇒ 认出来了
+        assert_eq!(
+            find_pending_hotkey(&pressed, SHIFT | CTRL, now, RECOGNIZE_WINDOW),
+            Some((KEY_A, Hotkey::Execute))
+        );
+        // D 同理
+        let pressed_d = vec![(KEY_D, now)];
+        assert_eq!(
+            find_pending_hotkey(&pressed_d, SHIFT | CTRL, now, RECOGNIZE_WINDOW),
+            Some((KEY_D, Hotkey::Paste))
+        );
+    }
+
+    /// 太久以前按下的键不再认 —— 防止"按住 A 打字半分钟,后来按了 ⌃⇧"
+    /// 被误判成快捷键、白白触发一次回放。
+    #[test]
+    fn 太久的键不认() {
+        let old = Instant::now();
+        let pressed = vec![(KEY_A, old)];
+        let later = old + RECOGNIZE_WINDOW + Duration::from_millis(1);
+        assert_eq!(
+            find_pending_hotkey(&pressed, SHIFT | CTRL, later, RECOGNIZE_WINDOW),
+            None
+        );
+    }
+
+    /// 有效修饰键 = 跟踪到的 ∪ 事件自带的。
+    ///
+    /// - **跟踪到的**:解决"按下有先后"的问题;
+    /// - **事件自带的**:覆盖"App 启动前用户就已经按着修饰键"
+    ///   (那个 `FlagsChanged` 我们根本没收到,跟踪不到)。
+    #[test]
+    fn 有效修饰键取并集() {
+        assert_eq!(
+            effective_modifiers(CGEventFlags::empty(), SHIFT | CTRL),
+            SHIFT | CTRL
+        );
+        assert_eq!(
+            effective_modifiers(SHIFT | CTRL, CGEventFlags::empty()),
+            SHIFT | CTRL
+        );
+        assert_eq!(effective_modifiers(SHIFT, CTRL), SHIFT | CTRL);
     }
 }
