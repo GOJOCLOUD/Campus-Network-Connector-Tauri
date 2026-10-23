@@ -68,6 +68,9 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     // 映射没建起来的原因(取字体失败/分析失败/映射为空)——
                     // 这些分支不报错,只看"enabled"会以为一切正常。
                     "mapping": safari::repair::mapping_note(),
+                    // **逐个作用域**的映射结果 —— 只留"最后一次"会把
+                    // 真正出问题的那条盖住(页面上常有五六个作用域)。
+                    "mappingScopes": safari::repair::mapping_results(),
                     // 判活查询的原始结果 + Safari 在不在跑。
                     // 2026-10-23 真故障:判活查询问的是 System Events(要另一份
                     // 自动化授权,用户从没被提示过)→ 一直判成"Safari 未运行"
