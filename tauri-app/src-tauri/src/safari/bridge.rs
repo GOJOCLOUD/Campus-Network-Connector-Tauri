@@ -291,22 +291,64 @@ pub fn list_tabs() -> Result<(Vec<(u32, u32, String)>, usize, Option<(u32, u32)>
     Ok((out, raw_lines, front))
 }
 
+/// 判活查询用的 AppleScript(提成常量:便于测试钉死口径,也便于复查)。
+///
+/// **不许改回 `tell application "System Events" …`** —— 那要另一份自动化授权,
+/// 用户从没被提示过 → 查不到 → 被判成"Safari 未运行" → 功能静默停掉。
+/// `application "Safari" is running` 不需要任何授权,也不会把 Safari 拉起来。
+const SAFARI_RUNNING_PROBE: &str = r#"application "Safari" is running"#;
+
 /// Safari 是否在运行(**带错误**)。
 ///
-/// 与 `safari_running()` 的区别:这里把"问不到"(Safari 没开)和
-/// "问不了"(没有自动化权限 / Apple Events 被拒)分开 —— 两者都返回 false
-/// 的话,用户会以为是 Safari 没运行,其实是没有权限。
+/// ## 不要再用 System Events 问（Electron 版用的是它）
+///
+/// System Events 的进程列表需要**另一份**自动化授权("自动化 → System Events")。
+/// 用户从来没被提示过这份授权 —— 查询拿不到结果,而老口径把"问不到"当成
+/// "没运行" → **整个功能静默停掉**:界面显示"已开启",实际一个标签都不处理。
+///
+/// 2026-10-23 真机故障就是这个:App 一直报"Safari 未运行"、
+/// `lastProbe` 全空(一次都没成功读到过标签),而 Safari 明明开着 19 个标签。
+///
+/// 改用 `application "Safari" is running`:
+/// - **不需要任何额外授权**(AppleScript 自己查进程表);
+/// - **不会把 Safari 拉起来**（问 Safari 自己才会启动它；`is running` 只查状态）;
+/// - 问不到时按"在跑"处理（与 Electron 版同口径）——
+///   **问不到 ≠ 没运行**,不能因此把整个功能停掉。
 pub fn safari_running_checked() -> Result<bool, String> {
-    let out = osa_async(
-        r#"tell application "System Events" to return (name of processes) contains "Safari""#,
-        5,
-    )?;
-    Ok(out == "true")
+    match osa_async(SAFARI_RUNNING_PROBE, 5) {
+        Ok(out) => {
+            let running = out.trim() == "true";
+            set_running_probe(&format!("`application \"Safari\" is running` → {}", out.trim()));
+            Ok(running)
+        }
+        Err(e) => {
+            // 问不到 ≠ 没运行:按"在跑"处理(与 Electron 版同口径),
+            // 真正的错误由紧随其后的 list_tabs 报出来(那里才有 -1743 这种准确原因)。
+            set_running_probe(&format!("查询失败: {}", e));
+            Ok(true)
+        }
+    }
 }
 
-/// Safari 是否在运行(拿不到就当没运行,只看"在不在"的地方用这个)。
+/// 最近一次判活查询的原始结果(诊断用)。
+pub fn safari_running_probe() -> String {
+    RUNNING_PROBE
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
+static RUNNING_PROBE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn set_running_probe(text: &str) {
+    if let Ok(mut slot) = RUNNING_PROBE.lock() {
+        *slot = text.to_string();
+    }
+}
+
+/// Safari 是否在运行(拿不到就当在运行,只看"在不在"的地方用这个)。
 pub fn safari_running() -> bool {
-    safari_running_checked().unwrap_or(false)
+    safari_running_checked().unwrap_or(true)
 }
 
 // ── 回归测试 ─────────────────────────────────────────
@@ -403,6 +445,30 @@ mod tests {
         // `run_js_in` 写临时文件前会对**整段脚本**做 to_ascii_js，
         // 所以断言的是最终真正写出去的那一份。
         assert!(to_ascii_js(&script).is_ascii(), "注入脚本必须是纯 ASCII");
+    }
+
+    /// 判活查询**不许用 System Events**。
+    ///
+    /// System Events 的进程列表要另一份自动化授权("自动化 → System Events"),
+    /// 用户从来没被提示过这份授权 → 查不到 → 被判成"Safari 未运行" →
+    /// 整个功能静默停掉(2026-10-23 真机故障:App 一直报"Safari 未运行",
+    /// `lastProbe` 全空,一次都没处理过任何标签,而 Safari 明明开着 19 个标签)。
+    ///
+    /// `application "Safari" is running` 不需要任何授权,也不会把 Safari 拉起来。
+    #[test]
+    fn 判活查询不依赖SystemEvents() {
+        assert!(
+            !SAFARI_RUNNING_PROBE.contains("System Events"),
+            "判活查询不许再问 System Events:它要另一份自动化授权,用户从没被提示过"
+        );
+        assert!(
+            SAFARI_RUNNING_PROBE.contains("is running"),
+            "判活查询必须是 `application \"Safari\" is running`(只查状态,不启动 Safari)"
+        );
+        assert!(
+            !SAFARI_RUNNING_PROBE.contains("tell application"),
+            "不能 `tell application \"Safari\"` —— 那会把 Safari 拉起来"
+        );
     }
 
     /// **用真的 JS 解析器校验真实产物**（node 在就跑，不在就明说跳过）。

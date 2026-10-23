@@ -651,11 +651,16 @@ pub fn check_now(app: &tauri::AppHandle, round: u64) -> Result<serde_json::Value
     // 区分"Safari 没运行"和"没有权限问 Safari"——后者是权限问题,得说清楚
     match bridge::safari_running_checked() {
         Ok(false) => {
-            set_last_error("Safari 未运行");
+            // **Safari 没开是中性状态,不是错误**(与 Electron 版同口径):
+            // 界面走 `safariRunning === false` 那条灰色提示。
+            // 这里若把 lastError 写成"Safari 未运行",界面会一直挂一条红字,
+            // 而真正的问题(权限/注入失败)就被它盖住了。
             if let Ok(mut s) = state().lock() {
                 s.safari_running = Some(false);
+                s.last_error.clear();
+                s.injected = false;
             }
-            return Ok(serde_json::json!({ "tabs": 0, "mapped": 0, "error": "Safari 未运行" }));
+            return Ok(serde_json::json!({ "tabs": 0, "mapped": 0, "error": "" }));
         }
         Ok(true) => {
             if let Ok(mut s) = state().lock() {
