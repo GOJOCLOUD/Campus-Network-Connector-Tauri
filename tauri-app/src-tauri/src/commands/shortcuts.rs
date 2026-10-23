@@ -96,8 +96,13 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let inputs = crate::commands::play::resolve_inputs(&clicks, None);
-    crate::commands::play::spawn_playback(file_name.clone(), clicks, 0.5, inputs);
-    record_shortcut_hit("⌃⇧A", &format!("开始回放 {}", file_name));
+    // 重入保护在这里生效:上一次回放还没结束时,这次**不重复执行**
+    // (2026-10-23 T0 事故:回放互相触发 ⇒ 无限循环 ⇒ 机器卡死)。
+    if crate::commands::play::spawn_playback(file_name.clone(), clicks, 0.5, inputs) {
+        record_shortcut_hit("⌃⇧A", &format!("开始回放 {}", file_name));
+    } else {
+        record_shortcut_hit("⌃⇧A", "上一次回放还没结束,这次没有重复执行");
+    }
     Ok(())
 }
 

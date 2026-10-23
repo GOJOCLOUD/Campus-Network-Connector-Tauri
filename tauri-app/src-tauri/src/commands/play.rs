@@ -18,6 +18,7 @@
 //! 回放是**异步**的:命令立刻返回"开始执行",真正的点击在后台线程里跑
 //! (Electron 版也是这么做的 —— 不然界面会被长回放卡住)。
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,6 +33,44 @@ use super::native;
 const AFTER_CLICK_MS: u64 = 100;
 const BEFORE_TEXT_MS: u64 = 100;
 const MIN_GAP_MS: u64 = 50;
+
+/// 回放是否正在进行(重入保护)。
+///
+/// ⚠️ **这是 2026-10-23 T0 事故的底线闸,不能去掉。**
+///
+/// 事故经过:回放时发出的**合成点击**如果落在 App 自己的窗口上,
+/// 就会点到自己界面上的「默认执行」按钮 → 又一次回放 → 再点自己 →
+/// **无限自激循环** → 疯狂敲键盘 → 整台机器卡死(用户被迫强制关机)。
+///
+/// 这道闸保证:**同一时刻最多一个回放**。不管多少触发源(界面按钮、
+/// 全局快捷键、界面里的 ⌃⇧A),后来的那些一律**拒绝**,不再起线程。
+///
+/// (macOS 线还多一道「落点在自己窗口上的点击不发出去」——
+///  那道用窗口坐标,与平台的合成输入坐标系有关,Windows 线暂不启用;
+///  **但闸 ① 是跨平台的纯逻辑,这里也必须有**。)
+static PLAYING: AtomicBool = AtomicBool::new(false);
+
+/// 因为"已经在放了"而被拒绝的回放次数(诊断用)。
+static REJECTED: AtomicU64 = AtomicU64::new(0);
+
+/// 回放进行中吗(诊断/界面用)。
+pub fn is_playing() -> bool {
+    PLAYING.load(Ordering::SeqCst)
+}
+
+/// 被拒绝的回放次数(诊断用)。
+pub fn rejected_count() -> u64 {
+    REJECTED.load(Ordering::SeqCst)
+}
+
+/// 回放线程结束时自动把 `PLAYING` 复位(哪怕线程 panic 了)。
+struct PlayingGuard;
+
+impl Drop for PlayingGuard {
+    fn drop(&mut self) {
+        PLAYING.store(false, Ordering::SeqCst);
+    }
+}
 
 /// 最近一次回放的状态。
 ///
@@ -158,7 +197,17 @@ pub fn spawn_playback(
     clicks: Vec<Value>,
     interval: f64,
     inputs: Option<Vec<Option<String>>>,
-) {
+) -> bool {
+    // **重入保护**:已经在放 ⇒ 这次直接拒绝,不另起线程。
+    // 没有这道闸,一次自激就能起出成百上千个回放线程 ⇒ 机器卡死。
+    if PLAYING.swap(true, Ordering::SeqCst) {
+        REJECTED.fetch_add(1, Ordering::SeqCst);
+        eprintln!(
+            "[playback] 上一次回放还没结束,这次没有重复执行(已拒绝 {} 次)",
+            REJECTED.load(Ordering::SeqCst)
+        );
+        return false;
+    }
     let planned = clicks.len();
     set_status(PlaybackStatus {
         file: file.clone(),
@@ -171,6 +220,8 @@ pub fn spawn_playback(
     let handle = thread::Builder::new()
         .name("cnc-playback".to_string())
         .spawn(move || {
+            // 线程结束(哪怕 panic)都要把 PLAYING 复位,否则回放再也起不来。
+            let _guard = PlayingGuard;
             let (executed, error) = run_clicks(&clicks, interval, inputs.as_deref());
             let mut st = last_status().unwrap_or_default();
             st.file = file;
@@ -179,9 +230,17 @@ pub fn spawn_playback(
             st.error = error;
             set_status(st);
         });
-    if let Ok(h) = handle {
-        // 丢弃 JoinHandle = 脱离等待,回放线程继续在后台跑
-        drop(h);
+    match handle {
+        Ok(h) => {
+            // 丢弃 JoinHandle = 脱离等待,回放线程继续在后台跑
+            drop(h);
+            true
+        }
+        Err(e) => {
+            PLAYING.store(false, Ordering::SeqCst);
+            eprintln!("[playback] 起回放线程失败: {}", e);
+            false
+        }
     }
 }
 
@@ -211,7 +270,10 @@ pub fn play_file(
 
     let interval = interval.unwrap_or(0.5);
     let inputs = resolve_inputs(&clicks, input_text.as_deref());
-    spawn_playback(file_name.clone(), clicks, interval, inputs);
+    if !spawn_playback(file_name.clone(), clicks, interval, inputs) {
+        // 被拒绝(上一次回放还没结束)⇒ 如实报错,不能让界面以为"开始执行了"。
+        return Err("上一次回放还没结束,这次没有重复执行".to_string());
+    }
     Ok(json!({ "status": "success", "message": "开始执行" }))
 }
 
@@ -222,6 +284,36 @@ pub fn play_data(clicks: Vec<Value>, interval: Option<f64>) -> Result<Value, Str
         return Err("没有可执行的点击".to_string());
     }
     let interval = interval.unwrap_or(0.5);
-    spawn_playback(String::new(), clicks, interval, None);
+    if !spawn_playback(String::new(), clicks, interval, None) {
+        return Err("上一次回放还没结束,这次没有重复执行".to_string());
+    }
     Ok(json!({ "status": "success" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **重入保护**:已经在回放时,再来一次必须被**拒绝**。
+    ///
+    /// 2026-10-23 T0 事故:回放时发出的合成点击落到 App 自己的界面上 →
+    /// 点到「默认执行」→ 又一次回放 → **无限自激循环** → 疯狂输入 →
+    /// 整台机器卡死(用户被迫强制关机)。
+    /// 这条用例锁住"同一时刻最多一个回放"这条底线。
+    #[test]
+    fn 回放期间不再起第二个回放() {
+        let before = rejected_count();
+        // 假装"已经在回放"
+        PLAYING.store(true, Ordering::SeqCst);
+        let clicks = vec![json!({"x": 10.0, "y": 20.0})];
+        let started = spawn_playback("测试".to_string(), clicks, 0.0, None);
+        PLAYING.store(false, Ordering::SeqCst); // 复原,别影响别的用例
+        assert!(!started, "已经在回放时,这次必须被拒绝");
+        assert!(
+            rejected_count() > before,
+            "被拒绝的次数要记下来(诊断用): {} → {}",
+            before,
+            rejected_count()
+        );
+    }
 }
