@@ -42,12 +42,18 @@ const ROOT = path.join(__dirname, '..', '..');
 const DESKTOP = path.join(os.homedir(), 'Desktop');
 
 // 容器里两条线是兄弟目录:electron/ 与 tauri/
-const SIBLING = fs.existsSync(path.join(ROOT, 'tauri-app'))
-  ? path.join(ROOT, '..', 'electron')
-  : path.join(ROOT, '..', 'tauri');
+//
+// ⚠️ 这个脚本在**两个仓库里各有一份**(内容必须保持一致),
+// 所以**不能**假设"当前就是 tauri 仓库" —— 得看脚本自己所在的位置。
+// (2026-10-23 踩过:从 electron/ 跑这个脚本,会跑去 tauri/ 里找 Electron 的产物,
+//  报「缺少产物」—— 路径解析是反的。)
+const IS_TAURI = fs.existsSync(path.join(ROOT, 'tauri-app'));
+const SIBLING = IS_TAURI ? path.join(ROOT, '..', 'electron') : path.join(ROOT, '..', 'tauri');
+const TAURI_REPO = IS_TAURI ? ROOT : SIBLING;
+const ELECTRON_REPO = IS_TAURI ? SIBLING : ROOT;
 
-const MAC_APP_ELECTRON = path.join(SIBLING, 'release', 'mac-arm64', '模拟输入.app');
-const MAC_APP_TAURI = path.join(ROOT, 'tauri-app', 'src-tauri', 'target', 'release', 'bundle', 'macos', '模拟输入-Tauri.app');
+const MAC_APP_ELECTRON = path.join(ELECTRON_REPO, 'release', 'mac-arm64', '模拟输入.app');
+const MAC_APP_TAURI = path.join(TAURI_REPO, 'tauri-app', 'src-tauri', 'target', 'release', 'bundle', 'macos', '模拟输入-Tauri.app');
 
 const REPO_TAURI = 'GOJOCLOUD/Campus-Network-Connector-Tauri';
 const REPO_ELECTRON = 'GOJOCLOUD/Campus-Network-Connector-Electron';
@@ -207,9 +213,63 @@ function toTrash(target) {
   }
 }
 
+/**
+ * **打包前自检** —— 2026-10-23 那次 P0 的直接产物。
+ *
+ * ## 为什么必须有这一步
+ *
+ * CI 的门禁管的是 **GitHub Release**;而**桌面交付包是本机脚本单独打的,
+ * 完全绕过 CI**。
+ *
+ * 那天 Electron 的包因为 electron-builder 的 `build.files` 白名单漏了两个
+ * 根目录模块 ⇒ CI 全绿、Release 也绿,但**用户装上启动就是崩的**
+ * —— 走的正是这条路(桌面 zip)。
+ *
+ * ⇒ 交付路径自己也得有门禁:**验不过就不出包**。
+ */
+function selfCheckBeforePack() {
+  console.log('\n[自检] 打包前先验产物:');
+
+  // ① Electron 版:跑它自己仓库的打包自检
+  //    (含「包内所有相对 require 都能解析」⇒ 漏打包当场暴露)
+  const electronVerify = path.join(ELECTRON_REPO, 'tools', 'verify', 'verify-package.cjs');
+  if (!fs.existsSync(electronVerify)) {
+    console.error(`  ✖ 找不到打包自检脚本: ${electronVerify}`);
+    process.exit(1);
+  }
+  try {
+    sh('node', [electronVerify, MAC_APP_ELECTRON], { stdio: 'inherit' });
+    console.log('  ✔ Electron 版打包自检通过');
+  } catch (err) {
+    console.error('  ✖ Electron 版打包自检不通过 ⇒ **不出包**');
+    console.error('    (这个包装上就是坏的:2026-10-23 用户拿到过启动即崩的包)');
+    process.exit(1);
+  }
+
+  // ② Tauri 版:运行时资源必须都在
+  //    参考库是**运行时**要读的(引擎按路径找它)—— 漏了不会报错,
+  //    只是「装上之后 Safari 复制修复静默失效」,同样是"装上才发现"。
+  const need = [
+    ['Contents/Info.plist', '应用信息'],
+    ['Contents/MacOS/simuinput-tauri', '主程序'],
+    ['Contents/Resources/icon.icns', '图标'],
+    ['Contents/Resources/resources/glyph-db-48.crdb.gz', '字形参考库(运行时资源)'],
+  ];
+  const missing = need.filter(([rel]) => !fs.existsSync(path.join(MAC_APP_TAURI, rel)));
+  if (missing.length) {
+    console.error('  ✖ Tauri 版缺东西 ⇒ **不出包**:');
+    for (const [rel, what] of missing) console.error(`    - ${rel}(${what})`);
+    process.exit(1);
+  }
+  console.log(`  ✔ Tauri 版产物齐全(${need.length} 项)`);
+}
+
 function main() {
   mustExist(MAC_APP_ELECTRON, '先构建 Electron 版: cd electron && npm run dist:mac:arm64');
   mustExist(MAC_APP_TAURI, '先构建 Tauri 版: cd tauri/tauri-app && npx @tauri-apps/cli@2 build --bundles app');
+
+  // 0) **先自检,再打包** —— 验不过就不出包(见 selfCheckBeforePack 的说明)
+  selfCheckBeforePack();
 
   // 1) macOS:两个 .app 打进一个 zip
   fs.rmSync(MAC_TARGET, { force: true });
