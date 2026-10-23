@@ -44,6 +44,12 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
             let tap_state = nativecmd::hotkey::diagnostics();
             #[cfg(not(target_os = "macos"))]
             let tap_state = serde_json::Value::Null;
+            // 最近一次「按一次快捷键会不会把 App 搞崩」的自检结果
+            // (2026-10-23 那次事故的复现脚本;只有 macOS 有自建的事件监听)。
+            #[cfg(target_os = "macos")]
+            let hotkey_check = nativecmd::hotkey::diag_result();
+            #[cfg(not(target_os = "macos"))]
+            let hotkey_check = serde_json::Value::Null;
             obj.insert(
                 "shortcuts".to_string(),
                 serde_json::json!({
@@ -55,6 +61,7 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     // "按了没反应"有好几种原因(系统没送来 / 动作失败 /
                     // 打进了中文输入法的候选框),光看注册成功分不出来。
                     "hits": commands::shortcuts::shortcut_hits(),
+                    "hotkeyTriggerCheck": hotkey_check,
                 }),
             );
             // Safari 修复的实际状态(失败原因最关键:权限/开关问题都体现在这里)
@@ -108,9 +115,17 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                         "file": st.file,
                         "clicks": st.clicks,
                         "executed": st.executed,
+                        // 因为落点在自己窗口上而被丢掉的条数(没发出去)
+                        "skipped": st.skipped,
                         "startedAtMs": st.started_at_ms,
                         "finishedAtMs": st.finished_at_ms,
                         "error": st.error,
+                        // 正在回放吗 / 因为"已经在放了"被拒绝过几次
+                        // (2026-10-23 T0:回放自激成无限循环,机器卡死)
+                        "playing": commands::play::is_playing(),
+                        "rejected": commands::play::rejected_count(),
+                        // 最近一次「两道闸」自检的结果(零副作用)
+                        "guardCheck": commands::play::guard_check(),
                     }),
                     None => serde_json::json!(null),
                 },
@@ -507,6 +522,7 @@ pub fn run() {
             nativecmd::tap_failed,
             commands::play::play_file,
             commands::play::play_data,
+            commands::play::diagnose_playback_guard,
             keepalive_get_status,
             keepalive_set_enabled,
             safari_repair_check_now,
@@ -515,6 +531,20 @@ pub fn run() {
             safari_repair_get_status,
         ])
         .setup(|app| {
+            // **第一件事**:记住 AppHandle 和主线程的线程号。
+            //
+            // Carbon 的文字输入源 API(TIS)只能在主线程调,在别的线程上
+            // 会直接 SIGTRAP 把 App 崩掉(2026-10-23 真机事故)。
+            // 这里记下来的线程号就是后面"到主线程去跑"的依据 ——
+            // 必须在任何命令/线程起来**之前**记,记错了会自锁。
+            nativecmd::init_main_thread(app.handle());
+            // 自检模式:快捷键命中了也**不执行**真动作
+            // (自检要真的按一次 ⌃⇧A,而那个动作是"回放录制文件",
+            //  会在用户屏幕上真的点来点去 —— 自检不能有这种副作用)。
+            #[cfg(target_os = "macos")]
+            if std::env::args().any(|a| a == "--diag-hotkey-trigger") {
+                nativecmd::hotkey::set_diag_mode(true);
+            }
             // 老用户升级过来:把 Electron 版的数据(录制文件、设置)补过来。
             // 两边的数据目录天生不同(Electron 用 package.json 的 name = "xyw",
             // Tauri 用 identifier),不补的话用户会"自己的录制文件全没了"。
@@ -581,6 +611,21 @@ pub fn run() {
                     nativecmd::rec::set_diag_result(result);
                 });
             }
+            // 启动参数带 `--diag-playback-guard` 时,跑一次
+            // 「回放的两道安全闸」的**零副作用**自检。
+            //
+            // 平时**不跑**。要查这件事时再手动带这个参数启动。
+            if std::env::args().any(|a| a == "--diag-playback-guard") {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    // 等窗口真的摆好(位置这时候才准)
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    let result = commands::play::diagnose_playback_guard(handle.clone())
+                        .unwrap_or_else(|e| serde_json::json!({ "error": e }));
+                    eprintln!("[diag] 回放安全闸自检: {}", result);
+                    commands::play::set_guard_check(result);
+                });
+            }
             // 注册全局快捷键。
             //
             // - **macOS**:自己用事件监听实现(见 `native::hotkey`)。
@@ -595,6 +640,21 @@ pub fn run() {
                 match nativecmd::hotkey::start(app.handle().clone()) {
                     Ok(_) => nativecmd::hotkey::set_expected(true),
                     Err(e) => eprintln!("[shortcut] 快捷键监听启动失败: {}", e),
+                }
+                // 启动参数带 `--diag-hotkey-trigger` 时,跑一次
+                // 「按一次快捷键会不会把 App 崩掉」的自检。
+                //
+                // 平时**不跑** —— 它会往自己身上发一次 ⌃⇧A。
+                // 要查这件事时再手动带这个参数启动。
+                if std::env::args().any(|a| a == "--diag-hotkey-trigger") {
+                    std::thread::spawn(move || {
+                        // 等 tap 建好
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        let result = nativecmd::hotkey::diagnose_hotkey_trigger()
+                            .unwrap_or_else(|e| serde_json::json!({ "error": e }));
+                        eprintln!("[diag] 快捷键自检: {}", result);
+                        nativecmd::hotkey::set_diag_result(result);
+                    });
                 }
             }
             #[cfg(not(target_os = "macos"))]

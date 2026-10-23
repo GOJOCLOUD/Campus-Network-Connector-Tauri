@@ -7,6 +7,7 @@
 //! 走的是**后端**这条路,不是界面上那条:快捷键在界面没打开时也要能用。
 
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::AppHandle;
 
@@ -18,31 +19,78 @@ use tauri::AppHandle;
 /// 命中了哪个键、动作结果是什么、当时系统输入源是谁。
 static HITS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
+/// 每条命中的自增编号(回填输入源时按编号找回来)。
+static HIT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// 记一次快捷键命中。
+///
+/// ⚠️ **这里绝不能同步读输入源。**
+///
+/// 这个函数会被**事件 tap 的回调线程**(线程名 `cnc-hotkey`)调到 ——
+/// 那是"按键被吞掉"的第一现场。两个坑:
+/// ① tap 回调里做慢活,系统会直接把这个 tap 关掉(快捷键间歇性失灵);
+/// ② 读输入源(Carbon TIS)在那个线程上会**把整个 App 崩掉**
+///    (2026-10-23 真机事故:EXC_BREAKPOINT/SIGTRAP,栈底
+///    `TSMGetInputSourceProperty` ← `processEventTapData`)。
+///
+/// 所以:先把命中记下来(输入源那一栏先空着),
+/// 再把"读输入源"丢给主线程**异步**做,读完回填。
 pub fn record_shortcut_hit(key: &str, outcome: &str) {
-    let source = crate::commands::native::get_current_input_source()
-        .map(|v| {
-            format!(
-                "{}({})",
-                v.get("name").and_then(|x| x.as_str()).unwrap_or("?"),
-                if v.get("isASCII").and_then(|x| x.as_bool()).unwrap_or(false) {
-                    "ASCII"
-                } else {
-                    "非ASCII"
-                }
-            )
-        })
-        .unwrap_or_else(|e| format!("读不到:{}", e));
+    record_shortcut_hit_detail(key, outcome, None)
+}
+
+/// 记一次快捷键命中(带诊断信息)。
+///
+/// `flags` 是那一下按键的事件标志位(只有事件 tap 回调拿得到)——
+/// 记下来是为了回答"到底什么样的事件被当成了快捷键"。
+pub fn record_shortcut_hit_detail(key: &str, outcome: &str, flags: Option<u64>) {
+    let id = push_hit(key, outcome, flags);
+    crate::commands::native::run_on_main_thread_detached(move || {
+        let label = crate::commands::native::current_input_source_info()
+            .map(|info| {
+                format!(
+                    "{}({})",
+                    info.name,
+                    if info.is_ascii { "ASCII" } else { "非ASCII" }
+                )
+            })
+            .unwrap_or_else(|e| format!("读不到:{}", e));
+        fill_hit_input_source(id, &label);
+    });
+}
+
+/// 先落一条命中(输入源待回填),返回它的编号。
+fn push_hit(key: &str, outcome: &str, flags: Option<u64>) -> u64 {
+    let id = HIT_SEQ.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut v) = HITS.lock() {
         v.push(serde_json::json!({
+            "id": id,
             "at": crate::commands::app::now_ms(),
             "key": key,
             "outcome": outcome,
-            "inputSource": source,
+            // 事件标志位(十六进制)——只有事件 tap 回调拿得到。
+            "flags": flags.map(|f| format!("0x{:x}", f)),
+            // 主线程读完输入源后回填这一栏。
+            "inputSource": "",
         }));
         if v.len() > 20 {
             let drop = v.len() - 20;
             v.drain(..drop);
+        }
+    }
+    id
+}
+
+/// 回填某条命中的输入源(在主线程上跑)。
+fn fill_hit_input_source(id: u64, label: &str) {
+    if let Ok(mut v) = HITS.lock() {
+        for e in v.iter_mut() {
+            if e.get("id").and_then(|x| x.as_u64()) == Some(id) {
+                if let Some(obj) = e.as_object_mut() {
+                    obj.insert("inputSource".to_string(), serde_json::json!(label));
+                }
+                break;
+            }
         }
     }
 }
@@ -96,8 +144,13 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let inputs = crate::commands::play::resolve_inputs(&clicks, None);
-    crate::commands::play::spawn_playback(file_name.clone(), clicks, 0.5, inputs);
-    record_shortcut_hit("⌃⇧A", &format!("开始回放 {}", file_name));
+    // 重入保护在这里生效:上一次回放还没结束时,这次**不重复执行**
+    // (2026-10-23 T0 事故:回放互相触发 ⇒ 无限循环 ⇒ 机器卡死)。
+    if crate::commands::play::spawn_playback(file_name.clone(), clicks, 0.5, inputs) {
+        record_shortcut_hit("⌃⇧A", &format!("开始回放 {}", file_name));
+    } else {
+        record_shortcut_hit("⌃⇧A", "上一次回放还没结束,这次没有重复执行");
+    }
     Ok(())
 }
 

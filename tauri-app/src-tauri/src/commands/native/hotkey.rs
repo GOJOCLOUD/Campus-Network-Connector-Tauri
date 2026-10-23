@@ -69,6 +69,41 @@ struct TapState {
 /// tap 的状态(运行自检用)。
 static STATE: OnceLock<Mutex<TapState>> = OnceLock::new();
 
+/// **自检模式**:命中了也**不执行**真动作。
+///
+/// 为什么要有:自检要真的按一次 ⌃⇧A,而 ⌃⇧A 的动作是"回放选中的录制文件"
+/// —— 那会在用户屏幕上真的点来点去。自检不能有这种副作用。
+static DIAG_MODE: AtomicBool = AtomicBool::new(false);
+
+/// 最近一次「按快捷键会不会把 App 搞崩」的自检结果(给 diag.json 看)。
+static DIAG_RESULT: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+
+fn diag_result_slot() -> &'static Mutex<Option<serde_json::Value>> {
+    DIAG_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+/// 打开/关闭自检模式。
+pub fn set_diag_mode(v: bool) {
+    DIAG_MODE.store(v, Ordering::SeqCst);
+}
+
+/// 现在是不是自检模式。
+pub fn diag_mode() -> bool {
+    DIAG_MODE.load(Ordering::SeqCst)
+}
+
+/// 记下最近一次自检结果。
+pub fn set_diag_result(value: serde_json::Value) {
+    if let Ok(mut slot) = diag_result_slot().lock() {
+        *slot = Some(value);
+    }
+}
+
+/// 最近一次自检结果。
+pub fn diag_result() -> Option<serde_json::Value> {
+    diag_result_slot().lock().ok().and_then(|s| s.clone())
+}
+
 fn state() -> &'static Mutex<TapState> {
     STATE.get_or_init(|| Mutex::new(TapState::default()))
 }
@@ -188,6 +223,19 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                         if let Ok(mut s) = state().lock() {
                             s.pending_keyups.push(keycode);
                         }
+                        // 事件的标志位一起记下来:下次再出"什么事件被当成了快捷键",
+                        // 不用再靠猜(2026-10-23 那次事故就靠它定位到了 tap 回调)。
+                        let flags = event.get_flags().bits();
+                        if diag_mode() {
+                            // 自检模式:只记命中,**不执行**真动作
+                            // (回放录制文件会在用户屏幕上乱点,自检不能有那种副作用)
+                            crate::commands::shortcuts::record_shortcut_hit_detail(
+                                hotkey.label(),
+                                "命中(自检模式,没执行动作)",
+                                Some(flags as u64),
+                            );
+                            return None;
+                        }
                         // 动作另起线程跑:tap 回调里不能做慢活,
                         // 超时系统会直接把这个 tap 关掉。
                         let app = app.clone();
@@ -199,9 +247,10 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                                 let _ = crate::commands::shortcuts::trigger_pinyin_from_clipboard(&app);
                             }
                         });
-                        crate::commands::shortcuts::record_shortcut_hit(
+                        crate::commands::shortcuts::record_shortcut_hit_detail(
                             hotkey.label(),
                             "命中(按键已吞掉)",
+                            Some(flags as u64),
                         );
                         // 返回 None = **吞掉这个按键** ⇒ 别的应用收不到,不会多打出 D
                         return None;
@@ -244,6 +293,54 @@ pub fn diagnostics() -> serde_json::Value {
         "alive": is_alive(),
         "error": last_error(),
     })
+}
+
+/// 自检:「按一次快捷键会不会把 App 搞崩」。
+///
+/// 2026-10-23 真机事故的复现脚本。分两步:
+/// ① 从**非主线程**读一次当前输入源 —— 这正是当时崩掉的那一步
+///    (Carbon TIS 在非主线程上调 → AppKit `dispatch_assert_queue` → SIGTRAP,
+///     整个 App 当场消失);
+/// ② 在**非主线程**记一次命中 —— 事件 tap 的回调线程走的就是这条路。
+///
+/// ⚠️ **这个自检不发任何系统级键盘/鼠标事件。**
+///
+/// 上一版自检往系统里 post 了一个**真的 ⌃⇧A**,结果:
+/// 它被用户的前台 App 和 App 自己的界面一起接住 → 触发「默认执行」→
+/// 回放录制文件 → 合成点击点回自己的「默认执行」按钮 → **无限自激循环** →
+/// 疯狂敲键盘 → 整台机器卡死(用户被迫强制关机,2026-10-23 T0 事故)。
+///
+/// 自检必须**零副作用**:只在自己进程内走一遍那条会崩的代码路径。
+///
+/// 结果写进 diag.json 的 `shortcuts.hotkeyTriggerCheck`。
+pub fn diagnose_hotkey_trigger() -> Result<serde_json::Value, String> {
+    // ① 非主线程读输入源 —— 崩溃那一步的原样复现。
+    //    修好之后这里应该**正常返回**(编排到主线程去读),不再把进程带走。
+    let probe = thread::spawn(|| crate::commands::native::current_input_source_info())
+        .join()
+        .map_err(|_| "读输入源的那个线程死了(旧版就是这个症状:整个 App 崩)".to_string())?;
+    // ② 非主线程记一次命中 —— tap 回调线程走的正是这条路。
+    //    (同上:**只在自己进程内走一遍**,不发任何系统事件。)
+    let hit = thread::spawn(|| {
+        crate::commands::shortcuts::record_shortcut_hit_detail(
+            "⌃⇧A",
+            "自检:非主线程记命中",
+            None,
+        );
+    })
+    .join()
+    .map_err(|_| "记命中那个线程死了(旧版就是这个症状:整个 App 崩)".to_string());
+    // 等主线程把输入源那一栏回填完
+    thread::sleep(Duration::from_millis(300));
+    let hits = crate::commands::shortcuts::shortcut_hits();
+    Ok(serde_json::json!({
+        "probeThreadRead": probe.is_ok(),
+        "probeError": probe.as_ref().err().cloned(),
+        "hitRecorded": hit.is_ok(),
+        "lastHit": hits.last().cloned(),
+        "tapAlive": is_alive(),
+        "sideEffects": "无:不发任何系统级键盘/鼠标事件,只在自己进程内走一遍会崩的代码路径",
+    }))
 }
 
 /// 原子开关(给上层看"我们期望它在跑")。

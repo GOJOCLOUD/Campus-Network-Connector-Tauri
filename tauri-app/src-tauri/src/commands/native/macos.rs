@@ -212,8 +212,30 @@ fn input_source_id(ptr: *const core::ffi::c_void) -> Option<String> {
 /// 当前输入源(拼音/ABC 等)。
 ///
 /// 返回 `{ id, name, isASCII }` —— 与 Electron 版原生模块同一形状。
+///
+/// ⚠️ Carbon TIS **只能在主线程调**(跑错线程不会报错,会**直接把 App 崩掉**,
+/// 见 `commands/native.rs` 里的说明)。这里统一走主线程编排,谁调用都安全。
 pub fn current_input_source_info() -> Result<crate::commands::native::InputSourceInfo, String> {
+    crate::commands::native::run_on_main_thread(
+        current_input_source_info_on_main,
+        std::time::Duration::from_secs(2),
+    )
+    // 编排本身失败(到不了主线程)与"读到的结果是错误"是两回事 ⇒ 两层都要往外传。
+    .and_then(|r| r)
+}
+
+/// 真正读输入源的实现 —— **只能在主线程调**。
+///
+/// 单独拆出来有两个原因:
+/// ① 让"跑错线程"能被**拦下来**(报错),而不是把整个 App 崩掉;
+/// ② 给单测留一个能直接调的入口(见文件末尾的用例)。
+fn current_input_source_info_on_main() -> Result<crate::commands::native::InputSourceInfo, String> {
     use crate::commands::native::InputSourceInfo;
+    // 守卫:不在主线程就**拒绝**,绝不硬调 Carbon。
+    // (这道闸就是 2026-10-23 那次崩溃的闸门。)
+    if !crate::commands::native::is_main_thread() {
+        return Err("读输入源必须在主线程调用(Carbon TIS 的要求)".to_string());
+    }
     unsafe {
         let src = tis::TISCopyCurrentKeyboardInputSource();
         if src.is_null() {
@@ -231,7 +253,22 @@ pub fn current_input_source_info() -> Result<crate::commands::native::InputSourc
 }
 
 /// 切换输入源(传输入源 id,如 "com.apple.keylayout.ABC")。
+///
+/// ⚠️ 同样只能在主线程调(Carbon TIS 的要求)—— 这里统一编排。
+/// ⌃⇧D 的动作跑在**动作线程**上(不是主线程),没有这层编排就会崩。
 pub fn select_input_source(source_id: String) -> Result<bool, String> {
+    crate::commands::native::run_on_main_thread(
+        move || select_input_source_on_main(source_id),
+        std::time::Duration::from_secs(5),
+    )
+    .and_then(|r| r)
+}
+
+/// 真正切输入源的实现 —— **只能在主线程调**。
+fn select_input_source_on_main(source_id: String) -> Result<bool, String> {
+    if !crate::commands::native::is_main_thread() {
+        return Err("切换输入源必须在主线程调用(Carbon TIS 的要求)".to_string());
+    }
     unsafe {
         // 用 UTF-8 字节直接构造 CFString(避免依赖 core-foundation 的类型 API)
         let mut buf: Vec<u8> = source_id.as_bytes().to_vec();
@@ -253,4 +290,39 @@ pub fn select_input_source(source_id: String) -> Result<bool, String> {
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在**非主线程**读输入源,不能把进程搞崩。
+    ///
+    /// 2026-10-23 真机事故:事件 tap 的回调线程(`cnc-hotkey`)里直接读了输入源,
+    /// Carbon TIS 内部 `dispatch_assert_queue` → SIGTRAP → 整个 App 当场崩
+    /// (崩溃报告栈底:`TSMGetInputSourceProperty` ← `processEventTapData`)。
+    ///
+    /// 这条用例就是那道闸:**跑错线程必须报错**,不能去碰 Carbon。
+    #[test]
+    fn 非主线程读输入源不崩() {
+        let r = std::thread::spawn(current_input_source_info_on_main)
+            .join()
+            .expect("线程本身不能崩");
+        assert!(
+            r.is_err(),
+            "跑错线程必须报错,不能真去调 Carbon(否则就是 2026-10-23 那次崩溃): {:?}",
+            r
+        );
+    }
+
+    /// 切输入源同理 —— ⌃⇧D 的动作跑在**动作线程**上,不是主线程。
+    #[test]
+    fn 非主线程切输入源不崩() {
+        let r = std::thread::spawn(|| {
+            select_input_source_on_main("com.apple.keylayout.ABC".to_string())
+        })
+        .join()
+        .expect("线程本身不能崩");
+        assert!(r.is_err(), "跑错线程必须报错: {:?}", r);
+    }
 }

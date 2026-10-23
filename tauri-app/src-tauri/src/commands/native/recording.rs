@@ -86,10 +86,8 @@ fn recorder() -> &'static Arc<Recorder> {
 /// 边界按**闭区间**算(和 Electron 版 `CGRectContainsPoint` 一致):
 /// 正好点在窗口边上也算「在窗口里」,不记。
 pub fn in_exclude(rect: &Option<[f64; 4]>, x: f64, y: f64) -> bool {
-    match rect {
-        Some(r) => x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3],
-        None => false,
-    }
+    // 判定只有一份 —— 见 `commands::native::in_exclude`。
+    crate::commands::native::in_exclude(rect, x, y)
 }
 
 /// 由窗口的**物理**位置/尺寸算出排除矩形,换算成**逻辑点**、左上角为原点。

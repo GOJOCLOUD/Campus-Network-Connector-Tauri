@@ -50,6 +50,126 @@ pub struct InputSourceInfo {
     pub is_ascii: bool,
 }
 
+// ── 主线程编排(Carbon TIS 的硬性要求)────────────────────────────
+//
+// ⚠️ **Carbon 的文字输入源 API 只能在主线程调。**
+//
+// `TISCopyCurrentKeyboardInputSource` / `TISGetInputSourceProperty` /
+// `TISSelectInputSource` 内部会走到 AppKit 的 `islGetInputSourceListWithAdditions`,
+// 那儿有一句 `dispatch_assert_queue`:不在主线程就直接
+// `dispatch_assert_queue_fail` → **SIGTRAP** → 整个 App 当场崩掉
+// (不是 Rust 的 panic,是进程直接消失)。
+//
+// **2026-10-23 真机事故就是这个**:全局快捷键的**事件 tap 回调线程**
+// (线程名 `cnc-hotkey`)在记命中时顺手读了一下当前输入源 → App 崩。
+// 崩溃报告(`~/Library/Logs/DiagnosticReports/simuinput-tauri-*.ips`):
+// `EXC_BREAKPOINT / SIGTRAP`,栈底 `TSMGetInputSourceProperty`
+// ← `processEventTapData`,faulting thread = `cnc-hotkey`。
+//
+// 所以这一层提供统一的"到主线程去跑"编排:
+// - 已经在主线程 → 直接跑(派发过去再等 = **自锁**);
+// - 不在主线程 → 派发到主线程,最多等一段时间,超时报错不无限等。
+//
+// 另外提供 `run_on_main_thread_detached`:派发过去**不等**。
+// 事件 tap 回调这种地方**绝对不能阻塞** —— tap 回调慢一点,系统会直接把
+// 这个 tap 关掉(快捷键就间歇性失灵了)。
+
+/// 启动时记住的 AppHandle(派发到主线程用)。
+static APP_HANDLE: std::sync::OnceLock<std::sync::Mutex<Option<tauri::AppHandle>>> =
+    std::sync::OnceLock::new();
+
+/// 主线程的线程号(`init_main_thread` 时记下)。
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// 启动时调用:记住 AppHandle 和**主线程的线程号**。
+///
+/// 必须在 `setup()` 的**第一行**调 —— `setup()` 本身就跑在主线程上,
+/// 这里记下来的才是真的主线程。记错了会导致"在主线程上派发到主线程再等"的自锁。
+pub fn init_main_thread(app: &tauri::AppHandle) {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+    if let Ok(mut slot) = APP_HANDLE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *slot = Some(app.clone());
+    }
+}
+
+/// 当前是不是主线程。
+pub fn is_main_thread() -> bool {
+    MAIN_THREAD
+        .get()
+        .map(|id| *id == std::thread::current().id())
+        .unwrap_or(false)
+}
+
+/// 拿全局 AppHandle。
+pub fn app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|s| s.clone()))
+}
+
+/// 到主线程去跑一个闭包并**等结果**。
+///
+/// 已经在主线程 → 直接跑(派发过去再等 = 自锁)。
+/// 不在主线程 → 派发到主线程,最多等 `timeout`;超时报错,不无限等。
+pub fn run_on_main_thread<F, R>(f: F, timeout: std::time::Duration) -> Result<R, String>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    if is_main_thread() {
+        return Ok(f());
+    }
+    let app = app_handle().ok_or_else(|| "还没有 AppHandle,到不了主线程".to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel::<R>();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(f());
+    })
+    .map_err(|e| format!("派发到主线程失败: {}", e))?;
+    rx.recv_timeout(timeout)
+        .map_err(|e| format!("等主线程的结果失败: {}", e))
+}
+
+/// 到主线程去跑一个闭包,**不等结果**。
+///
+/// 用于事件 tap 回调这种"绝对不能阻塞"的地方。
+pub fn run_on_main_thread_detached<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    if is_main_thread() {
+        f();
+        return;
+    }
+    if let Some(app) = app_handle() {
+        let _ = app.run_on_main_thread(f);
+    }
+}
+
+/// 点 `(x, y)` 是否落在矩形 `rect` 里(闭区间)。
+///
+/// `rect` 是 `[左, 上, 右, 下]`(逻辑点、左上角为原点)——
+/// 见 `rec::rect_from_physical`。
+///
+/// **两处要用它,必须是同一份判定**:录制时排除自己窗口上的点击、
+/// 回放时不把点击打到自己窗口上。写成两套迟早会写出两套不一样的边界。
+pub fn in_exclude(rect: &Option<[f64; 4]>, x: f64, y: f64) -> bool {
+    match rect {
+        Some(r) => x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3],
+        None => false,
+    }
+}
+
+/// 读当前输入源(跨平台统一入口;macOS 走 Carbon TIS)。
+///
+/// macOS 上这个调用**内部会到主线程去跑**(Carbon 的硬性要求),
+/// 所以谁调用都不会崩 —— 包括事件 tap 的回调线程。
+pub fn current_input_source_info() -> Result<InputSourceInfo, String> {
+    imp::current_input_source_info()
+}
+
 /// 鼠标点击(左键按下+抬起)。坐标是屏幕全局坐标。
 #[tauri::command]
 pub fn mouse_click(x: f64, y: f64) -> Result<bool, String> {
@@ -280,4 +400,27 @@ pub fn is_recording() -> bool {
 #[tauri::command]
 pub fn tap_failed() -> bool {
     rec::tap_failed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 单测进程里**没有**注册主线程 ⇒ `is_main_thread()` 必须是 false。
+    ///
+    /// 记错主线程的后果是:在主线程上"派发到主线程再等"= 自锁。
+    #[test]
+    fn 单测进程里不算主线程() {
+        assert!(!is_main_thread());
+    }
+
+    /// 没有 AppHandle 时,"到主线程去跑"必须**干脆报错**,不能挂死。
+    ///
+    /// (单测进程里没有 Tauri App。这条用例保证那条路径是"失败得快",
+    ///  而不是等一个永远不会来的结果。)
+    #[test]
+    fn 没有AppHandle时到主线程会报错() {
+        let r = run_on_main_thread(|| 42u32, std::time::Duration::from_millis(200));
+        assert!(r.is_err(), "没有 AppHandle 时必须干脆报错,不能挂死: {:?}", r);
+    }
 }
