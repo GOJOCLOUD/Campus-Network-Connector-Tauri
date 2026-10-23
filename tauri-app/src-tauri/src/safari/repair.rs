@@ -106,6 +106,10 @@ struct CipherTabs {
     heartbeats: u64,
     /// 快通道最近一次心跳的时刻（判断它是不是还活着）
     last_beat: std::time::Instant,
+    /// 上一轮**干活**用了多久（毫秒）—— 干活 = 发 Apple Event 的那些时间
+    last_work_ms: u64,
+    /// 上一轮**整个周期**用了多久（毫秒）= 干活 + 轮间 sleep
+    last_period_ms: u64,
 }
 
 static CIPHER_TABS: OnceLock<Mutex<CipherTabs>> = OnceLock::new();
@@ -116,6 +120,8 @@ fn cipher_tabs() -> &'static Mutex<CipherTabs> {
             tabs: std::collections::HashMap::new(),
             heartbeats: 0,
             last_beat: std::time::Instant::now(),
+            last_work_ms: 0,
+            last_period_ms: 0,
         })
     })
 }
@@ -171,6 +177,10 @@ pub fn fast_diagnostics() -> serde_json::Value {
             "heartbeats": c.heartbeats,
             "alive": c.last_beat.elapsed() < std::time::Duration::from_secs(2),
             "intervalMs": FAST_POLL_INTERVAL_MS,
+            // **这一轮真正花了多久** —— 名义间隔只是名义值,
+            // 实际周期 = 干活时间 + 轮间 sleep(Apple Event 往返 ≈90ms/次)。
+            "workMs": c.last_work_ms,
+            "periodMs": c.last_period_ms,
         }),
         Err(_) => serde_json::json!({ "error": "快通道状态锁不可用" }),
     }
@@ -194,6 +204,7 @@ fn unlock_tab(key: (u32, u32)) {
 pub fn spawn_fast_poller(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         loop {
+            let t_round = std::time::Instant::now();
             if is_enabled() {
                 if let Ok(mut c) = cipher_tabs().lock() {
                     c.heartbeats += 1;
@@ -205,7 +216,23 @@ pub fn spawn_fast_poller(app: tauri::AppHandle) {
                     fast_tick(&app);
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(FAST_POLL_INTERVAL_MS));
+            // **量这一轮真正花了多久** —— 名义间隔是名义值:
+            // 实际周期 = 干活(Apple Event 往返)+ 轮间 sleep。
+            // 这个数以前没人量过,文档里写的"200ms 一轮"其实对不上。
+            let work_ms = t_round.elapsed().as_millis() as u64;
+            // **睡到下一轮的名义时刻**（不是"干完再睡 200ms"）。
+            //
+            // Electron 版是 `setInterval(fastTick, 200)` —— 那是**两次开始之间** 200ms，
+            // 干活的时间算在里面。这边照搬同一个口径（ADR-0016 说"照搬形状"），
+            // 否则周期 = 干活 + 200ms（工作 110ms 时实测 310ms；修 state_once 之前
+            // 工作 240ms 时是 450ms），比 Electron 慢一截，
+            // 而用户等的就是这几百毫秒。
+            let sleep_ms = FAST_POLL_INTERVAL_MS.saturating_sub(work_ms);
+            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+            if let Ok(mut c) = cipher_tabs().lock() {
+                c.last_work_ms = work_ms;
+                c.last_period_ms = t_round.elapsed().as_millis() as u64;
+            }
         }
     });
 }
@@ -257,7 +284,45 @@ pub fn last_error() -> String {
 }
 
 /// 各标签的注入计数（用于"每隔几轮补一次注入"）。
-static state_once: OnceLock<Mutex<u32>> = OnceLock::new();
+///
+/// **必须按标签分别计数**：Electron 版是 `tabState.ticksSinceInject`（每个标签一份），
+/// 而这里原来是一个**全局**计数器 —— 一轮里要处理好几个标签，计数被摊薄，
+/// 实际每 1~2 轮就强制重注入一次（一次 Apple Event ≈110ms），
+/// 比 Electron 频繁 2.5 倍，白白吃掉一截轮次时间。
+static STATE_ONCE: OnceLock<Mutex<std::collections::HashMap<(u32, u32), u32>>> = OnceLock::new();
+
+/// 每个标签的「处理轮次」计数（强制重注入的节流用）。
+///
+/// **必须走这个函数拿**（`get_or_init`）——
+/// 直接 `STATE_ONCE.get()` 永远是 `None`（OnceLock 从没被 `set` 过），
+/// 计数就恒为 0 → `0 % FORCE_INJECT_EVERY == 0` 恒成立 →
+/// **每轮都强制重注入一次**（一次 25KB 脚本的 Apple Event ≈110ms）。
+/// 实测那会让快通道每轮多花一倍时间（工作 240ms、周期 450ms；
+/// 修好后工作 ~110ms、周期 ~200ms）。
+fn state_once() -> &'static Mutex<std::collections::HashMap<(u32, u32), u32>> {
+    STATE_ONCE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 已经喊过"重报"的标签（每个标签只喊一次）。
+///
+/// **为什么必须喊**：守卫"页面里已经有映射就不上报"这条规则是按**页面**的状态算的，
+/// 而 App 是另一个进程 —— App 重启后自己手里是空的，页面却还留着上一任 App
+/// 下发的映射 → 守卫以为"不用报" → **App 永远学不到这个作用域** →
+/// 也就不会登记这个标签 → **快通道根本不盯它** →
+/// 换题之后只能等主通道那一圈（~1.2 秒）→ 用户"换题立刻复制"就复制出密文。
+static RESYNCED_TABS: OnceLock<Mutex<std::collections::HashSet<(u32, u32)>>> = OnceLock::new();
+
+fn resynced_tabs() -> &'static Mutex<std::collections::HashSet<(u32, u32)>> {
+    RESYNCED_TABS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 这个标签是不是**第一次**被处理？第一次的话要喊一声"重报"。
+fn claim_resync(window_index: u32, tab_index: u32) -> bool {
+    match resynced_tabs().lock() {
+        Ok(mut set) => set.insert((window_index, tab_index)),
+        Err(_) => false,
+    }
+}
 
 /// 记下最近一次「映射没建起来」的原因（诊断用）。
 pub fn set_mapping_note(note: &str) {
@@ -491,6 +556,58 @@ fn remember_font_failure(url: &str, message: &str) {
     }
 }
 
+/// 字体**解析/分析**失败的负缓存（key = URL 或字体内容哈希）。
+///
+/// ## 为什么要有（它和"下载失败负缓存"不是一回事）
+///
+/// 站点的 @font-face 经常指向一个**返回 HTML 错误页**的 URL：
+/// 实测学习通的 `icomoon.ttf?ca3c1w` 返回 **529 字节的 HTML 文档**。
+/// 这种 URL **下载是"成功"的**（curl 退出码 0、字节非空），
+/// 所以"下载失败负缓存"根本抓不到它 ——
+/// 于是每轮都要重新下载一次（实测 **130~160ms**）+ 再解析一遍，
+/// 白白吃掉一整轮的时间：**快通道的实测周期从 205ms 变成 417ms**。
+///
+/// 记两份：
+/// - **URL 级**：在下载之前就命中 → 连下载都省掉。
+/// - **内容哈希级**：在解析之前命中 → 覆盖 `data:` 内嵌字体那条路。
+///
+/// 冷却时间沿用"下载失败负缓存"那档（10 分钟）。
+static ANALYSIS_FAILS: OnceLock<Mutex<Vec<(String, FontFailure)>>> = OnceLock::new();
+
+fn analysis_fail_cache() -> &'static Mutex<Vec<(String, FontFailure)>> {
+    ANALYSIS_FAILS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 记一次字体解析失败（key = URL 或内容哈希）。
+fn remember_analysis_failure(key: &str, message: &str) {
+    if let Ok(mut cache) = analysis_fail_cache().lock() {
+        cache.retain(|(k, _)| k != key);
+        cache.push((
+            key.to_string(),
+            FontFailure {
+                at: crate::commands::app::now_ms(),
+                message: message.to_string(),
+            },
+        ));
+        while cache.len() > 32 {
+            cache.remove(0);
+        }
+    }
+}
+
+/// 取一次字体解析失败（冷却期内才有；过期了要重新试，因为可能是临时故障）。
+fn analysis_failure(key: &str) -> Option<String> {
+    let hit = analysis_fail_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.iter().find(|(k, _)| k == key).map(|(_, f)| f.clone()))?;
+    if crate::commands::app::now_ms() - hit.at < FONT_FAIL_COOLDOWN_MS {
+        Some(hit.message)
+    } else {
+        None
+    }
+}
+
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut rev = [255u8; 256];
@@ -622,8 +739,20 @@ fn analyze_font(
     {
         return Ok(cached);
     }
+    // **解析失败也要缓存**（按内容哈希）：不缓存的话，每轮都要重新解析一遍
+    // （站点的图标字体 URL 常常返回 HTML 错误页 → 解析必失败 → 每轮白花时间）。
+    if let Some(hit) = analysis_failure(&hash) {
+        return Err(hit);
+    }
 
-    let face = Face::parse(font_bytes, 0).map_err(|e| format!("字体解析失败: {}", e))?;
+    let face = match Face::parse(font_bytes, 0) {
+        Ok(face) => face,
+        Err(e) => {
+            let msg = format!("字体解析失败: {}", e);
+            remember_analysis_failure(&hash, &msg);
+            return Err(msg);
+        }
+    };
     let t = Thresholds::default();
     let window = RasterWindow::CANONICAL;
 
@@ -784,16 +913,20 @@ fn check_tab_inner(
     // 顺序必须和 Electron 版一致（先采集、缺守卫才注入）：
     // 注入是一次"等页面 JS 返回"的 Apple Event，每轮都重注入会把页面拖住，
     // AppleScript 一直等 → 8 秒超时。Electron 版只注入一次，所以不会卡。
-    let state = bridge::poll_state(Some(tab_index), Some(window_index))?;
+    //
+    // **第一次处理这个标签时要喊一声"重报"**：让页面把已知作用域重新报一遍，
+    // 否则 App 学不到它们 → 不会登记这个标签 → 快通道是瞎的（见 resynced_tabs）。
+    let resync = claim_resync(window_index, tab_index);
+    let state = bridge::poll_state(Some(tab_index), Some(window_index), resync)?;
 
     // 2) 守卫不在才注入（每 FORCE_INJECT_EVERY 轮再强制补一次，对齐 Electron）
     let guard_present = state.get("guard").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut inject_count = 0u32;
-    if let Some(cell) = state_once.get() {
-        if let Ok(mut slot) = cell.lock() {
-            *slot += 1;
-            inject_count = *slot;
-        }
+    {
+        let mut slots = state_once().lock().map_err(|_| "计数器锁坏了".to_string())?;
+        let counter = slots.entry((window_index, tab_index)).or_insert(0);
+        *counter += 1;
+        inject_count = *counter;
     }
     // **这个标签到底有没有被接管**（界面上的「已接管」靠它）。
     //
@@ -855,12 +988,27 @@ fn check_tab_inner(
                 set_mapping_result(scope_key, "该作用域没有可取的字体来源(普通字体,不需要映射)");
                 continue;
             };
+            // **先看"这个字体解析不出来"的负缓存**：连下载都省掉。
+            //
+            // 站点的图标字体 URL 常常返回 HTML 错误页（实测学习通 icomoon.ttf
+            // 返回 529 字节 HTML）—— 那种下载是"成功"的，
+            // "下载失败负缓存"抓不到 → 每轮白下载一次（130~160ms）。
+            if kind == "url" {
+                if let Some(hit) = analysis_failure(&value) {
+                    set_mapping_result(scope_key, &format!("分析字体失败(负缓存): {}", hit));
+                    continue;
+                }
+            }
             let Ok(font_bytes) = fetch_font(&kind, &value) else {
                 set_mapping_result(scope_key, &format!("取字体失败({}): {}", kind, value));
                 continue;
             };
             // 同一个字体只解析一次(按内容哈希缓存)
             let Ok(entries) = analyze_font(matcher.db(), &matcher, &font_bytes) else {
+                // 解析失败也要记负缓存：否则每轮都重新解析一遍（白花时间）。
+                if kind == "url" {
+                    remember_analysis_failure(&value, &format!("解析失败: {}", value));
+                }
                 set_mapping_result(scope_key, &format!("分析字体失败: {}", value));
                 continue;
             };
@@ -1155,6 +1303,41 @@ mod tests {
         // 带前缀的老格式也要认。
         let bytes = fetch_font("data", "data:font/woff2;base64,AAECAw==").expect("应该解得开");
         assert_eq!(bytes, vec![0u8, 1, 2, 3]);
+    }
+
+    /// 字体**解析不出来**也要负缓存。
+    ///
+    /// 站点的图标字体 URL 常常返回 HTML 错误页（实测学习通的 icomoon.ttf
+    /// 返回 529 字节 HTML）—— 那种下载是"成功"的（curl 退出码 0），
+    /// 所以"下载失败负缓存"抓不到它 → 每轮都白下载一次（实测 130~160ms）
+    /// 再解析一遍 → 快通道的实测周期从 205ms 变成 417ms。
+    #[test]
+    fn 解析失败进负缓存_冷却期内不再重复() {
+        let key = "test://analysis-fail-key";
+        if let Ok(mut cache) = analysis_fail_cache().lock() {
+            cache.retain(|(k, _)| k != key);
+        }
+        assert!(
+            analysis_failure(key).is_none(),
+            "一开始不该有失败记录(否则这条用例会被上一轮跑过的残留污染)"
+        );
+
+        remember_analysis_failure(key, "字体解析失败: 假的");
+        assert_eq!(
+            analysis_failure(key).as_deref(),
+            Some("字体解析失败: 假的"),
+            "冷却期内应当能取到失败记录"
+        );
+
+        // 冷却过期 → 允许重试（失败也可能是临时故障）
+        if let Ok(mut cache) = analysis_fail_cache().lock() {
+            for (k, f) in cache.iter_mut() {
+                if k == key {
+                    f.at -= FONT_FAIL_COOLDOWN_MS + 1000;
+                }
+            }
+        }
+        assert!(analysis_failure(key).is_none(), "冷却过期后应当允许重试");
     }
 
     /// 混淆字体要能**整份**还原(不只选区里那几个字)——

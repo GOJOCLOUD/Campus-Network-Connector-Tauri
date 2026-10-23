@@ -186,6 +186,33 @@ function suite(label, getSrc) {
     assert.strictEqual(taken.pending[0].groups[0].scopeKey, 'scope#C');
   });
 
+  test(`[${label}] resync() 必须喊到每一层 frame(只喊顶层等于没喊)`, () => {
+    const quiz = makeFrame('quiz');
+    const mid = makeParent('mid', [quiz]);
+    const top = makeParent('top', [mid]);
+    const bridge = installBridge(top, getSrc());
+
+    let topCalls = 0;
+    let quizCalls = 0;
+    top.__copyRepairResync = () => {
+      topCalls += 1;
+      return 'OK';
+    };
+    quiz.__copyRepairResync = () => {
+      quizCalls += 1;
+      return 'OK';
+    };
+
+    const count = bridge.resync();
+    assert.ok(count >= 2, 'resync 至少要喊到顶层和题目那层,实际: ' + count);
+    assert.strictEqual(topCalls, 1, '顶层必须被喊到');
+    assert.strictEqual(
+      quizCalls,
+      1,
+      '题目那层必须被喊到 —— 真正带混淆字体的往往是嵌套 frame,只喊顶层等于没喊'
+    );
+  });
+
   test(`[${label}] debug() 在有 pending 时不能抛异常(诊断工具不能自己坏)`, () => {
     const quiz = makeFrame('quiz');
     quiz.__copyRepairGuard.pending = { groups: [{ scopeKey: 'scope#D', chars: ['天'] }] };

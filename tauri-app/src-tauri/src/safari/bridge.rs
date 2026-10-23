@@ -112,9 +112,16 @@ pub fn target(tab_index: Option<u32>, window_index: Option<u32>) -> String {
 /// 一轮状态采集：**一次 Apple Event 拿到全部信息**。
 ///
 /// 返回 `{ guard, pending, frames, unrepaired, collect, url }`。
-pub fn poll_state(tab_index: Option<u32>, window_index: Option<u32>) -> Result<serde_json::Value, String> {
+pub fn poll_state(
+    tab_index: Option<u32>,
+    window_index: Option<u32>,
+    resync: bool,
+) -> Result<serde_json::Value, String> {
     let t = target(tab_index, window_index);
-    let js = r#"(function(){
+    // 用**拼接**而不是 format!:脚本里有大量花括号,format! 会把它们当占位符。
+    let mut js = String::from("(function(){\n");
+    js.push_str(
+        r#"
       var g = window.__copyRepairGuard;
       var out = {
         guard: !!g,
@@ -122,8 +129,36 @@ pub fn poll_state(tab_index: Option<u32>, window_index: Option<u32>) -> Result<s
         collect: 'none',
         frames: [],
         unrepaired: [],
+        resync: 0,
         url: String(location.href || ''),
       };
+      "#,
+    );
+    if resync {
+        js.push_str(
+            r#"
+      // 让页面里的守卫**把已知作用域重新报一遍**。
+      // App 刚启动时必须做:页面里还留着上一任 App 下发的映射,
+      // 守卫会以为"不用报" → App 永远学不到这个作用域 →
+      // 也就不会登记这个标签 → **快通道根本不盯它** →
+      // 换题之后只能等主通道那一圈(~1.2 秒),用户"换题立刻复制"就复制出密文。
+      //
+      // **必须走 bridge**:它把这一声喊到**所有 frame**——
+      // 真正带混淆字体的往往是嵌套 frame(学习通在第 3~4 层),
+      // 只喊顶层等于没喊(顶层通常压根没有自定义字体)。
+      //
+      // 顺序:必须在下面的 collect/take **之前** ——
+      // 这样重新报上来的作用域在**同一次** Apple Event 里就被收走。
+      try {
+        var rb = window.__copyRepairBridge;
+        if (rb && typeof rb.resync === 'function') { out.resync = rb.resync(); }
+        else if (typeof window.__copyRepairResync === 'function') { window.__copyRepairResync(); out.resync = 1; }
+      } catch (e) { }
+      "#,
+        );
+    }
+    js.push_str(
+        r#"
       if (g) {
         if (window.__copyRepairCollect) {
           try { out.collect = String(window.__copyRepairCollect()); } catch (e) { out.collect = 'error'; }
@@ -143,8 +178,9 @@ pub fn poll_state(tab_index: Option<u32>, window_index: Option<u32>) -> Result<s
       return JSON.stringify(out).replace(/[^\x00-\x7F]/g, function (c) {
         return '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
       });
-    })()"#;
-    let raw = run_js_in(&t, js)?;
+    })()"#,
+    );
+    let raw = run_js_in(&t, &js)?;
     serde_json::from_str(&raw).map_err(|e| format!("解析 pollState 失败: {}", e))
 }
 

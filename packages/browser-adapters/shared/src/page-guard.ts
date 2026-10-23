@@ -20,7 +20,7 @@
 
 import { COMMON_CHARSET } from './common-charset';
 
-const GUARD_VERSION = 6;
+const GUARD_VERSION = 9;
 
 export interface PageGuardOptions {
   /** 页面暴露给 App 的接口名 */
@@ -49,6 +49,43 @@ interface GuardState {
   /** 上次采集的选区文本，用于避免重复渲染 */
   lastCollectedText: string;
   lastCollectedScope: string;
+  /** 当前 @font-face 集合的签名（换题 = 混淆字体换了 = 签名变） */
+  fontSig: string;
+  /**
+   * 页面内容**是不是变了**（DOM 增删过）。
+   *
+   * 为什么不能只看 @font-face 签名：站点的顺序是
+   * 「先注入新字体的 @font-face → 再把题目文字渲染出来」，
+   * 也就是**字体规则比用到它的元素先到**。
+   * 签名在第一次扫描时就已经是新字体的了 → 后面签名再不变 →
+   * 「只在字体变了才重扫」这条规则就永远等不到那次重扫 →
+   * **新题目的作用域一直没被发现** → 映射没下发 → 用户复制出密文。
+   *
+   * 实测（2026-10-23 真机）：重载题目那层后，守卫扫了 0 个作用域，
+   * 手动把签名清空再扫一次，立刻就发现了（映射随后送达）。
+   *
+   * 所以触发条件是「字体变了 **或** DOM 变了」。
+   */
+  domDirty: boolean;
+  /** 上次全量扫描时，这个页面上**还挂着**的全部作用域（判断"旧指纹"用） */
+  pageScopes: string[];
+  /** 上次上报出去的分组（App 一直没送回映射时，重试要靠它的字体来源） */
+  reportedGroups: PendingBatch['groups'];
+  /** scopeKey → 上次上报的时刻（**仅诊断用**：App 没确认时每一轮都会重报） */
+  reportedAt: Record<string, number>;
+  /**
+   * scopeKey → App 把映射送达这一层的时刻。
+   *
+   * **为什么不能拿 `mappings` 当"App 已经知道"的判据**：
+   * `mappings` 是"页面能不能修复复制"（复制时查表用），`deliveredAt` 才是
+   * "App 知不知道这个作用域"（决定要不要重报）。两者在正常运行期一致，
+   * 但**App 重启**之后就不一致了：页面还留着上一任 App 下发的映射（复制照样能修），
+   * 而新 App 手里是空的 —— 若拿 `mappings` 当判据，页面就永远不会再报，
+   * App 永远学不到这个作用域 → 不会登记这个标签 → **快通道是瞎的** →
+   * 换题后只能等主通道那一圈（~1.2 秒）→ 用户"换题立刻复制"复制出密文
+   * （2026-10-23 真机故障：第 1 次成功、第 2 次失败）。
+   */
+  deliveredAt: Record<string, number>;
   /** 停用标志：置 true 后守卫不再做任何事（用于清理误注入） */
   disabled: boolean;
   /** 内部调用标志：护栏不得拦截我们自己的 preventDefault/setData */
@@ -241,18 +278,157 @@ function pickFontUrl(src: string): FontSource | null {
  * 站点换字体时字体族名往往**不变**（还是 `font-cxsecret`），但里面的字形换了。
  * 如果作用域 key 只用字体族，旧字体的映射会残留下来；新字体里同一个码位含义
  * 不同时就会写出错字。把字体内容指纹并进作用域 key，换字体 = 换作用域 = 重新映射。
+ *
+ * ## 必须**整份**哈希，不能取样
+ *
+ * 取样哈希（每 N 个字符取一个）在一对"结构相同、只有字形不同"的字体上会**撞车**
+ * ——而站点的混淆字体正是这样生成的：表结构一模一样，只有字形数据不同。
+ * 一旦撞车：新字体沿用旧作用域 → 页面不再上报（App 认为"已知"）→
+ * 旧映射继续套在新字体上 → **复制出来是错字**（不是密文，是错的字）。
+ * 整份哈希 18KB 字符串只要 ~0.1ms，扫描时每个字体算一次，完全可以接受。
  */
 function fontFingerprint(font: FontSource | null): string {
   if (!font) return 'nofont';
+  return font.kind + hashString(font.kind + ':' + font.value);
+}
+
+/**
+ * 字符串短哈希（FNV-1a）。
+ *
+ * 只用来判断"变了没有"，不需要抗碰撞——变了能被发现就行。
+ */
+function hashString(input: string): string {
   let hash = 0x811c9dc5;
-  const source = font.kind + ':' + font.value;
-  // base64 可能十几 KB，取样哈希足够区分不同字体，又不至于每次遍历整串
-  const step = Math.max(1, Math.floor(source.length / 512));
-  for (let i = 0; i < source.length; i += step) {
-    hash ^= source.charCodeAt(i);
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  return font.kind + hash.toString(36);
+  return hash.toString(36);
+}
+
+/**
+ * 当前页面的 @font-face 集合签名。
+ *
+ * **为什么需要它**：站点换题时会换掉混淆字体（`font-cxsecret` 的字体文件变了），
+ * 作用域指纹随之变化 → 必须重新建映射。而"字体到底变了没有"这件事，
+ * **只读 CSSOM 就能知道**，不必去遍历所有元素算 getComputedStyle。
+ *
+ * 代价：每轮遍历同源样式表里的 @font-face 规则（几十条，微秒级）；
+ * 换来的是预热扫描（全元素遍历，约 13ms/帧）**只在字体变了时才做**。
+ *
+ * src 要**整段参与哈希**：字体文件是 base64 内嵌的，
+ * 只看前几百个字符有撞车风险（旧字体与新字体头部可能很像）。
+ */
+function fontFaceSignature(): string {
+  const parts: string[] = [];
+  try {
+    const sheets = Array.from(document.styleSheets);
+    for (const sheet of sheets) {
+      let rules: CSSRuleList | null = null;
+      try {
+        rules = sheet.cssRules;
+      } catch (_) {
+        continue; // 跨源样式表读不到
+      }
+      if (!rules) continue;
+      for (const rule of Array.from(rules)) {
+        if ((rule as CSSFontFaceRule).type !== 5) continue;
+        const style = (rule as CSSFontFaceRule).style;
+        if (!style) continue;
+        parts.push(
+          normalizeFamily(style.getPropertyValue('font-family') || '') +
+            '|' + (style.getPropertyValue('font-weight') || '').trim().toLowerCase() +
+            '|' + (style.getPropertyValue('font-style') || '').trim().toLowerCase() +
+            '|' + hashString(style.getPropertyValue('src') || ''),
+        );
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  parts.sort();
+  return parts.join(';');
+}
+
+/**
+ * 这个作用域要不要上报？
+ *
+ * 判据是**这一层自己的 deliveredAt**：App 把映射下发回来时会写进
+ * `state.deliveredAt[scopeKey]` → 说明 App 已经处理过这个作用域，不必再报。
+ *
+ * ## 为什么 ack 之前**每一轮都报**
+ *
+ * 以前这里是"报过但没收到映射 → 冷却 3 秒再试"。那个冷却会造成**致盲**：
+ * 报告可能在路上丢掉（frame 被重建、上一任 App 留下的账本、报告被别的东西取走），
+ * 而 App 一次都没收到 → 这 3 秒里 App 根本不知道这个作用域存在 →
+ * 用户复制就是密文，而 App 明明下一秒就能拿到。
+ *
+ * 真正的节流靠的是 **ack**，不是计时器：App 一旦把映射送回来，
+ * 这一层就不再报（下面解释为什么这样就够）。
+ *
+ * ## 为什么 ack 之后就不报了
+ *
+ * App 下发的映射是**按整份字体**建的 —— 字体里每个码位都解了，
+ * 整份一起下发（见 engine 的 processScope）。所以后续选区里出现新字，
+ * 表里已经有了 → 不需要再报。
+ *
+ * 为什么必须这样：以前每一轮都把同一批作用域重报一遍，
+ * App 就每轮重新建一次映射、下发一次（一次 Apple Event ≈110ms）——
+ * 一轮的一半时间都花在**重复下发**上，而映射其实早就到位了。
+ * 实测这一项就把一轮从 330ms 压到 110ms。
+ *
+ * 顺带解决"新 frame"：站点重建题目区域时，那一层的守卫是新的、
+ * deliveredAt 是空的 → 它会自然上报 → App 把映射下发到新 frame ✓。
+ */
+function shouldReportScope(state: GuardState, scopeKey: string): boolean {
+  // App 已经确认处理过这个作用域 → 不用再报。
+  if (state.deliveredAt && state.deliveredAt[scopeKey]) return false;
+  return true;
+}
+
+/**
+ * 暂存并上报一批作用域。
+ *
+ * 只上报 App 还没送达到这一层的那部分 —— 其它部分保持"已送达"状态，
+ * 不再重复触发 App 的建映射 + 下发。
+ */
+function stageAndReport(
+  state: GuardState,
+  groups: PendingBatch['groups'],
+  kind: 'prefetch' | 'selection',
+): 'new' | 'same' | 'none' {
+  // 候选里可能有**重复的作用域**：预热扫描的结果与"上次报过的"合并时，
+  // 同一个 scopeKey 会出现两次。两个都会通过 shouldReportScope 的过滤 →
+  // App 把同一份映射建两遍、下发两遍（一次 ≈110ms，纯浪费）。
+  const unique: PendingBatch['groups'] = [];
+  const seen = new Set<string>();
+  for (const g of groups) {
+    if (!g || seen.has(g.scopeKey)) continue;
+    seen.add(g.scopeKey);
+    unique.push(g);
+  }
+  const toReport = unique.filter((g) => shouldReportScope(state, g.scopeKey));
+  if (toReport.length === 0) return 'same';
+  state.pending = { groups: toReport };
+  const now = Date.now();
+  // 记住报过的分组：**重试时要用它的字体来源**（不然 App 拿不到字体文件）。
+  const keep = new Map<string, PendingBatch['groups'][number]>();
+  for (const g of state.reportedGroups) keep.set(g.scopeKey, g);
+  for (const g of toReport) {
+    // 诊断：这个作用域最后一次上报的时刻。
+    state.reportedAt[g.scopeKey] = now;
+    keep.set(g.scopeKey, g);
+  }
+  state.reportedGroups = [...keep.values()].slice(-12);
+  log(state, 'pending', {
+    kind,
+    groups: toReport.length,
+    chars: toReport.reduce((n, g) => n + g.chars.length, 0),
+    fonts: toReport.map((g) => (g.font ? g.font.kind : 'none')),
+    prefetch: toReport.filter((g) => g.prefetch).length,
+  });
+  reportToTop(state, 'pending', { groups: toReport });
+  return 'new';
 }
 
 /**
@@ -570,15 +746,40 @@ function collectAndStage(state: GuardState): 'new' | 'same' | 'none' {
   }
 
   const collected = collectSelection();
-  // 预热扫描总是做（实测 13ms）：把本页所有自定义字体都报上去，
+  // **预热扫描：字体变了 **或** 页面内容变了才做**。
+  //
+  // 以前每一轮都扫（全元素 getComputedStyle，实测 13ms/帧）——
+  // 一页有十个 frame 就是 130ms，占掉一整轮的一半时间，
+  // 而绝大多数轮次里字体根本没变，扫出来的东西也一模一样。
+  //
+  // 现在改成：先算 @font-face 集合的签名（只读 CSSOM，微秒级），
+  // 签名变了才做全量扫描 —— **换题正好就是签名变了的那一刻**，
+  // 于是"新字体的映射提前建好"这件事不受影响，轮次却便宜了一大半。
+  //
+  // **但只看签名不够**：站点的顺序是「先注入新字体的 @font-face → 再渲染题目文字」，
+  // 字体规则比用到它的元素**先到** —— 第一次扫描时签名已经是新字体的了，
+  // 之后签名再不变 → 永远等不到那次重扫 → 新题目的作用域一直没被发现
+  // （实测：重载题目那层后守卫扫到 0 个作用域，手动清空签名再扫一次立刻发现）。
+  // 所以还要看**DOM 变没变**（state.domDirty，由 MutationObserver 置位）。
+  const sig = fontFaceSignature();
+  const fontsChanged = sig !== state.fontSig;
+  state.fontSig = sig;
+  const needScan = fontsChanged || state.domDirty;
+
+  // 预热扫描：把本页所有自定义字体都报上去，
   // App 侧把映射提前建好 → 用户什么时候复制都不用等。
-  const prefetch = collectPrefetchScopes();
+  const prefetch = needScan ? collectPrefetchScopes() : [];
+  if (needScan) {
+    // 记下"这个页面上现在挂着哪些作用域"。
+    // 换题之后这个列表就是**新**的 —— 后面判断"哪个是失效的旧指纹"要用它。
+    state.pageScopes = prefetch.map((g) => g.scopeKey);
+    state.domDirty = false;
+  }
   if (!collected) {
-    if (prefetch.length === 0) return 'none';
-    state.pending = { groups: prefetch };
-    log(state, 'prefetch', { groups: prefetch.length });
-    reportToTop(state, 'pending', { groups: prefetch });
-    return 'new';
+    // 候选 = 预热分组 + 上次报过但还没收到映射的（重试）
+    const candidates = prefetch.concat(state.reportedGroups);
+    if (candidates.length === 0) return 'none';
+    return stageAndReport(state, candidates, 'prefetch');
   }
   state.lastSelectionText = collected.text;
 
@@ -620,11 +821,34 @@ function collectAndStage(state: GuardState): 'new' | 'same' | 'none' {
     }
   }
 
+  // 预热分组与选区分组按 scopeKey 去重（选区里的优先，带上字符）。
+  for (const g of prefetch) {
+    if (activeScopes.has(g.scopeKey)) continue;
+    activeScopes.add(g.scopeKey);
+    pendingGroups.push(g);
+  }
+  // 上次报过、但 App 一直没把映射送回来的 → 冷却到了就重试
+  // （重试要用它自己的字体来源，所以这里带上原分组）
+  for (const g of state.reportedGroups) {
+    if (activeScopes.has(g.scopeKey)) continue;
+    activeScopes.add(g.scopeKey);
+    pendingGroups.push(g);
+  }
+
+  // **当前还活着的作用域** = 选区正在用的 + 页面上还挂着的字体。
+  //
+  // 少了后面这一半就会误删：换题之后，用户可能选中的是**旧字体的残留元素**
+  // （页面里还留着上一题的元素），而新字体的映射刚下发好 ——
+  // 判据只看选区的话，新映射会被当成"失效的旧指纹"删掉，
+  // 页面上的映射又空了一档，用户在这个空档里复制就是密文。
+  const aliveScopes = new Set<string>(activeScopes);
+  for (const s of state.pageScopes) aliveScopes.add(s);
+
   // 同一字体族换了字体（指纹变了）时，删掉旧指纹留下的映射，避免旧表越积越多
   const currentByBase = new Map<string, string>();
-  for (const scope of activeScopes) currentByBase.set(scope.split('#')[0], scope);
+  for (const scope of aliveScopes) currentByBase.set(scope.split('#')[0], scope);
   for (const key of Object.keys(state.mappings)) {
-    if (activeScopes.has(key)) continue;
+    if (aliveScopes.has(key)) continue;
     const current = currentByBase.get(key.split('#')[0]);
     if (current && current !== key) delete state.mappings[key];
   }
@@ -638,27 +862,54 @@ function collectAndStage(state: GuardState): 'new' | 'same' | 'none' {
     if (!state.charScopes[char]) state.charScopes[char] = scope;
   }
 
-  // 预热分组与选区分组按 scopeKey 去重（选区里的优先，带上字符）
-  for (const g of prefetch) {
-    if (activeScopes.has(g.scopeKey)) continue;
-    activeScopes.add(g.scopeKey);
-    pendingGroups.push(g);
-  }
   if (pendingGroups.length === 0) return 'none';
 
-  state.pending = { groups: pendingGroups };
-  log(state, 'pending', {
-    groups: pendingGroups.length,
-    chars: pendingGroups.reduce((n, g) => n + g.chars.length, 0),
-    fonts: pendingGroups.map((g) => (g.font ? g.font.kind : 'none')),
-    prefetch: pendingGroups.filter((g) => g.prefetch).length,
-  });
-  reportToTop(state, 'pending', { groups: pendingGroups });
-  return 'new';
+  // 只上报 App 还没送达到这一层的那部分（其余的早已下发，不必重复下发）
+  return stageAndReport(state, pendingGroups, 'selection');
+}
+
+/**
+ * 把旧版本的守卫状态**就地**升级到当前版本。
+ *
+ * ## 为什么保留 mappings / charScopes
+ *
+ * 它们是"页面能不能修复复制"用的（复制时按作用域查表）。
+ * 同一个字体 → 同一个作用域（key 里带字体内容指纹）→ 旧映射在新版本里照样是对的，
+ * 升级并不会让它失效。以前换版本是整个换新实例 → mappings 被清空 →
+ * 从那一刻起用户复制就是密文，要等 App 重新下发才恢复 ——
+ * **升级本身制造了一个"复制出密文"的窗口**，这正是我们在修的那类问题。
+ *
+ * ## 为什么清掉 deliveredAt
+ *
+ * 那是"App 知不知道这个作用域"的账本。新一任 App 手里是空的，
+ * 必须让页面把作用域重新报一遍，否则 App 永远学不到它
+ * （学不到 → 不登记这个标签 → 快通道是瞎的 → 换题后只能等主通道那一圈）。
+ *
+ * ## 为什么把 fontSig 清空
+ *
+ * 强制下一次采集重扫一遍全量，把"这一版才知道的作用域"也补上报上来
+ * （否则只有上次报过的那几个会被重新报）。
+ */
+function migrateState(old: GuardState): GuardState {
+  const next = old as GuardState;
+  next.version = GUARD_VERSION;
+  if (!next.mappings || typeof next.mappings !== 'object') next.mappings = {};
+  if (!next.charScopes || typeof next.charScopes !== 'object') next.charScopes = {};
+  if (!Array.isArray(next.pageScopes)) next.pageScopes = [];
+  if (!Array.isArray(next.reportedGroups)) next.reportedGroups = [];
+  if (!next.reportedAt || typeof next.reportedAt !== 'object') next.reportedAt = {};
+  // App 侧的账本：清空 → 这一批作用域会重新上报。
+  next.deliveredAt = {};
+  // 强制下一次采集重扫全量。
+  next.fontSig = '';
+  // DOM 变化标记：升级后先按"变了"处理一次（老版本没这个概念）。
+  next.domDirty = true;
+  return next;
 }
 
 function install(): GuardState {
   const existing = window[API];
+  let state: GuardState;
   if (existing) {
     if (existing.version === GUARD_VERSION) {
       // 走 log() 而不是直接 push —— 否则绕过 200 条上限，
@@ -673,25 +924,35 @@ function install(): GuardState {
       /* ignore */
     }
     existing.log.push({ at: Date.now(), event: 'upgraded' });
+    // **就地升级**：保留已有的 mappings/charScopes，只补齐新版本新增的字段。
+    state = migrateState(existing);
+  } else {
+    state = {
+      version: GUARD_VERSION,
+      installedAt: Date.now(),
+      pending: null,
+      mappings: {},
+      charScopes: {},
+      deliveredAt: {},
+      log: [],
+      repairs: 0,
+      copyEvents: 0,
+      lastSelectionText: '',
+      lastCollectedText: '',
+      lastCollectedScope: '',
+      // 初次为 ''：第一次采集时签名必然不同 → 装好就预热一次 ✓
+      fontSig: '',
+      // 装好时先按"内容变了"处理一次 → 第一次采集就会全量扫一遍。
+      domDirty: true,
+      pageScopes: [],
+      reportedGroups: [],
+      reportedAt: {},
+      disabled: false,
+      guardActive: false,
+      intentText: null,
+      internalCall: false,
+    };
   }
-
-  const state: GuardState = {
-    version: GUARD_VERSION,
-    installedAt: Date.now(),
-    pending: null,
-    mappings: {},
-    charScopes: {},
-    log: [],
-    repairs: 0,
-    copyEvents: 0,
-    lastSelectionText: '',
-    lastCollectedText: '',
-    lastCollectedScope: '',
-    disabled: false,
-    guardActive: false,
-    intentText: null,
-    internalCall: false,
-  };
   window[API] = state;
   log(state, 'installed');
 
@@ -704,6 +965,26 @@ function install(): GuardState {
     }
   };
   document.addEventListener('selectionchange', onSelectionChange, true);
+
+  // ---- DOM 变化监听：只置一个标志位，真正的扫描在下一轮采集里做 ----
+  //
+  // 为什么需要：站点的顺序是「先注入新字体的 @font-face → 再渲染题目文字」，
+  // **字体规则比用到它的元素先到**。只看 @font-face 签名的话，
+  // 第一次扫描时签名就已经是新字体的了 → 后面签名不再变 → 再也不会重扫 →
+  // 新题目的作用域一直没被发现 → 映射没下发 → 用户复制出密文
+  // （2026-10-23 真机：重载题目那层后守卫扫到 0 个作用域；
+  //   手动清空签名再扫一次立刻就发现了）。
+  //
+  // 这里只做"脏标记"，不做任何扫描 —— 扫描仍然是每轮最多一次。
+  let domObserver: MutationObserver | null = null;
+  try {
+    domObserver = new MutationObserver(() => {
+      state.domDirty = true;
+    });
+    domObserver.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (_) {
+    domObserver = null;
+  }
 
   // ---- 原型护栏 ----
   // 网页的脚本先于我们执行注册，其 window 捕获监听器**先注册者先执行**，
@@ -779,6 +1060,12 @@ function install(): GuardState {
   state.uninstall = () => {
     document.removeEventListener('selectionchange', onSelectionChange, true);
     window.removeEventListener('copy', onCopy, true);
+    // DOM 监听必须断开：否则重装一次就多一个观察者在跑。
+    try {
+      domObserver?.disconnect();
+    } catch (_) {
+      /* ignore */
+    }
     // 原型必须还原：否则重装一次就多套一层 wrapper
     try {
       restorePrototypes();
@@ -865,6 +1152,7 @@ if (typeof window !== 'undefined') {
     if (!state) return 'NO-GUARD';
     state.disabled = true;
     state.mappings = {};
+    state.deliveredAt = {};
     state.pending = null;
     log(state, 'disabled');
     return 'OK';
@@ -878,12 +1166,46 @@ if (typeof window !== 'undefined') {
     // 合并而不是覆盖：密文→明文是**字体的属性**，不随选区变化。
     // 只保留本次上报过的字，避免选区变化时把已知的映射弄丢。
     state.mappings[scopeKey] = { ...(state.mappings[scopeKey] || {}), ...(mapping || {}) };
+    // 记下"App 已经把映射送到这一层"→ 之后不必再为它上报。
+    state.deliveredAt[scopeKey] = Date.now();
     return 'OK';
   };
   (window as unknown as Record<string, unknown>).__copyRepairCollect = () => {
     const state = window[API];
     if (!state) return 'none';
     return collectAndStage(state);
+  };
+  /**
+   * 让守卫**把已知的作用域重新报一遍**（App 启动时对每个标签喊一次）。
+   *
+   * ## 为什么需要它
+   *
+   * 守卫"App 已经送达到就不上报"这条规则是按**页面里的账本**算的，
+   * 而 App 是**另一个进程**：App 重启之后，它自己手里是空的，
+   * 页面却还留着上一任 App 下发的映射 → 守卫觉得"不用报" → App 永远学不到这个作用域。
+   *
+   * 后果很严重：**App 学不到作用域，就不会登记这个标签 → 快通道根本不盯它**
+   * → 换题之后只能等主通道那一圈（~1.2 秒）→ 用户"换题立刻复制"就复制出密文
+   * （2026-10-23 真机故障：第 1 次成功、第 2 次失败）。
+   *
+   * ## 关键：清哪本账、不清哪本账
+   *
+   * - **清 `deliveredAt`**（"App 知不知道"）→ 这一批作用域会重新上报 ✓
+   * - **保留 `mappings`**（"页面能不能修复复制"）→ 用户在这段时间里复制**照样拿到明文** ✓
+   *   清掉它反而会制造一个"复制出密文"的窗口，比不 resync 更糟。
+   * - **清 `reportedAt` / `pending`**：重试冷却重新开始。
+   * - **`fontSig` 清空**：强制下一次采集重扫一遍全量，
+   *   把"只存在于预热扫描里、当前没有选区"的作用域也一并报上来。
+   */
+  (window as unknown as Record<string, unknown>).__copyRepairResync = () => {
+    const state = window[API];
+    if (!state) return 'NO-GUARD';
+    state.deliveredAt = {};
+    state.reportedAt = {};
+    state.pending = null;
+    state.fontSig = '';
+    log(state, 'resync');
+    return 'OK';
   };
   installPageGuard();
 }
