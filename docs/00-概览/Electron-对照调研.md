@@ -193,6 +193,36 @@ Rust 侧把守卫源码**原样**拼进 `{ guardSource: "..." }` 的 JS 字符�
 - `真实注入脚本能被javascript解析` —— 把整段脚本丢给 `node --check`(没有 node 就明说跳过)
 - `注入脚本里没有非ascii字符` —— AppleScript 按本地编码解码,非 ASCII 必须先转义
 
+### 2026-10-23 又断了三处:判活查询、frame 名单、字体分析(ADR-0015)
+
+ADR-0014 修掉了「守卫一次都没装上」。这一轮用户报的是**第一次成功、后两次失败**,
+还怀疑「题目被写死过」。在真实学习通测验页上逐层拆,查出**另外三处断点** ——
+**都不是"写死"**(全仓核对没有任何写死的字→字映射),
+真实原因是第一份字体的分析结果被缓存,换新字体缓存不命中。
+
+| # | 断点 | Electron 怎么做 | Tauri 之前 | Tauri 现在 |
+| --- | --- | --- | --- | --- |
+| 1 | **判活查询** | `tell application "System Events" to (name of processes) contains "Safari"` | **照搬了 Electron 的写法** → System Events 要**另一份**自动化授权,用户从没被提示过 → 查不到 → 被判成"没运行" → **整个功能静默停掉** | 改用 `application "Safari" is running`(不需任何授权、也不把 Safari 拉起来);**问不到 ≠ 没运行**;Safari 没开改成中性状态 |
+| 2 | **iframe 桥的 frame 名单** | 同一份 `frame-bridge.ts`(逐字相同) | 名单**从不刷新**,站点在嵌套 frame 内部换 iframe 时顶层 MutationObserver 看不见 → 映射发到已经变成 `about:blank` 的旧 frame → **真正有题目的那层一份映射都收不到** | `take()`/`setMapping()` 开头都先 `scan()`;`scan()` 剔除非当前树里的旧 frame;`debug()` 的 pending 形状修正 |
+| 3 | **字体分析耗时** | 串行 | 串行**实测 11 秒** → 这段时间页面上没有映射 → 换题后立刻复制必然是密文 | rayon 并行,**判定口径一个字都没改**,实测 11 秒 → **2.5 秒** |
+
+**第 1 条是两条线唯一的口径差异**:Tauri 线不再问 System Events,
+Electron 线仍问(那条路要一份用户从没被授予过的授权)。
+**第 2 条两边都改了** —— `frame-bridge` 是两个仓库共用的同一份源码,
+修复必须**显式搬**(Electron 仓库提交 `88f466a`)。
+
+真机对照(2026-10-23,题目在第 4 层同源 iframe `top>1>1>1`):
+修复前那层映射数 = 0、守卫日志 `copy-no-mapping`;修复后 10 层 frame 全部拿到映射
+(33 个字)、`copy-repaired`,剪贴板出明文。换题窗口实测:340ms 仍密文,**2065ms 已是明文**。
+
+### 这一轮新增的回归测试
+
+- `判活查询不依赖SystemEvents`(Rust)—— 钉死"不许出现 System Events / tell application"
+- `tools/verify/verify-frame-bridge.cjs`(Node,3 个用例)—— 纯 node 造一棵假 frame 树,
+  模拟"站点换掉 iframe",断言**新那层必须收到映射**。
+  **同一个测试拿修复前的 frame-bridge.js 跑会红**(3 个用例红 2 个)—— 不是假通过。
+- 诊断新增 `mappingScopes`(逐作用域记映射结果)、`safariRunning`、`runningProbe` 三个字段。
+
 ---
 
 ## 四、还没搬完的 / 需要拍板的
