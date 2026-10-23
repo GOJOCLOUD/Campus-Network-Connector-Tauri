@@ -155,6 +155,22 @@ function cipherElement(text = '题干文字') {
   return el;
 }
 
+/** 一个用**普通字体**的元素(页面里没有对应的 @font-face → 永远建不出映射)。 */
+function normalElement(text = '题干文字') {
+  const el = {
+    textContent: text,
+    __style: {
+      fontFamily: '"Microsoft YaHei", SimSun, Arial, sans-serif',
+      fontWeight: '400',
+      fontStyle: 'normal',
+      display: 'block',
+      visibility: 'visible',
+    },
+  };
+  el.__textNode = { nodeType: 3, data: text, parentElement: el };
+  return el;
+}
+
 /** 装上守卫(在假的 window 上 eval),返回可操作的状态句柄。 */
 function installGuard(win, src, nowFn) {
   const listeners = {};
@@ -510,6 +526,88 @@ function suite(label, getSrc) {
       [scope1, scope2],
       '两个作用域的映射都应当在(旧的那个是选区正在用的)'
     );
+  });
+
+  test(`[${label}] 普通字体(没有字体来源)的作用域不上报(它永远建不出映射)`, () => {
+    // 真实页面里,题干周围全是**普通字体**(正文、选项、说明)——
+    // 这些作用域的 key 结尾是 `#nofont`:**没有字体文件**,App 侧永远建不出映射。
+    //
+    // 以前它们每轮都被报上去:App 每轮白处理一遍、页面每轮多报一遍,
+    // 日志的 200 条环形缓冲还被 'pending' 冲光(真正的复制记录被挤没了)。
+    const normal = normalElement('题干文字');
+    const page = makePage({ elements: [normal] });
+    page.win.__selection = {
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => '题干文字',
+      getRangeAt: () => ({ commonAncestorContainer: normal.__textNode }),
+    };
+    const h = installGuard(page.win, getSrc());
+
+    for (let i = 0; i < 3; i += 1) {
+      h.collect();
+      assert.strictEqual(
+        reportedGroups(h).length,
+        0,
+        `第 ${i + 1} 轮不该上报普通字体作用域(它没有字体文件,永远建不出映射)`
+      );
+    }
+    assert.deepStrictEqual(
+      Object.keys(h.state.reportedAt),
+      [],
+      '普通字体作用域不该出现在"已上报"名单里'
+    );
+
+    // 对照:选区落在**混淆字体**元素里时,必须照常上报
+    // (别把过滤做成"什么都不报")。
+    const cipher = cipherElement();
+    const page2 = makePage({ elements: [cipher] });
+    page2.win.__selection = {
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => '题干文字',
+      getRangeAt: () => ({ commonAncestorContainer: cipher.__textNode }),
+    };
+    const h2 = installGuard(page2.win, getSrc());
+    h2.collect();
+    assert.strictEqual(
+      reportedGroups(h2).length,
+      1,
+      '混淆字体作用域必须照常上报'
+    );
+  });
+
+  test(`[${label}] 内容没变的 pending 不重复记日志(环形缓冲要留给真正要看的记录)`, () => {
+    // 'pending' 是**每轮**都会发生的事(App 还没确认过 → 每轮重报)。
+    // 以前每轮都往日志里塞一条 → 三十来秒就把 200 条的环形缓冲冲光,
+    // `copy-repaired` / `copy-no-mapping` 这些真正要看的记录被挤没了 ——
+    // 排查时连"这次复制走了哪条路径"都查不到。
+    const el = cipherElement();
+    const page = makePage({ elements: [el] });
+    const h = installGuard(page.win, getSrc());
+
+    const count1 = h.state.log.filter((e) => e.event === 'pending').length;
+    for (let i = 0; i < 50; i += 1) {
+      h.collect();
+      reportedGroups(h);
+    }
+    const count2 = h.state.log.filter((e) => e.event === 'pending').length;
+    assert.strictEqual(
+      count2,
+      count1,
+      '内容没变就不该重复记 pending(轮数再多也不该涨)'
+    );
+    assert.ok(
+      h.state.log.length <= 3,
+      '日志不能被 pending 冲光(200 条环形缓冲要留给真正要看的记录),实际 ' + h.state.log.length + ' 条'
+    );
+
+    // 上报内容真的变了 → 必须再记一条(否则日志里看不出变化)
+    page.setSrc('url(data:font/woff2;base64,CCCC)');
+    h.collect();
+    reportedGroups(h);
+    const count3 = h.state.log.filter((e) => e.event === 'pending').length;
+    assert.ok(count3 > count2, '上报内容变了必须再记一条 pending');
   });
 }
 

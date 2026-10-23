@@ -20,7 +20,7 @@
 
 import { COMMON_CHARSET } from './common-charset';
 
-const GUARD_VERSION = 9;
+const GUARD_VERSION = 10;
 
 export interface PageGuardOptions {
   /** 页面暴露给 App 的接口名 */
@@ -135,6 +135,17 @@ function log(state: GuardState, event: string, data?: unknown): void {
   state.log.push({ at: Date.now(), event, data });
   if (state.log.length > 200) state.log.splice(0, state.log.length - 200);
 }
+
+/**
+ * 上一次记进日志的 pending 批次指纹。
+ *
+ * 为什么需要它：pending 是**每轮**都会发生的事（只要有作用域还没被 App 确认）。
+ * 之前每轮都往日志里塞一条 → 200 条的环形缓冲三十来秒就被冲光，
+ * 真正要看的 `copy-repaired` / `copy-no-mapping` 记录被挤没了
+ * —— 排查时「复制到底走了哪条路径」都查不到。
+ * 内容没变就不重复记，变了才记一条。
+ */
+let lastPendingSig: string | null = null;
 
 /** 把 font-family 列表拆成数组，正确处理引号内的逗号（如 local("PingFang,SC")） */
 function splitFamilies(fontFamily: string): string[] {
@@ -407,26 +418,39 @@ function stageAndReport(
     seen.add(g.scopeKey);
     unique.push(g);
   }
-  const toReport = unique.filter((g) => shouldReportScope(state, g.scopeKey));
+  // **没有字体来源的作用域(普通字体)永远建不出映射** → 报给 App 也没用,
+  // 只会让页面**每轮重报**一次(废掉日志环形缓冲、把真正的复制记录挤出去;
+  // App 侧每轮也要白处理一遍)。
+  //
+  // 会不会漏报?不会:作用域 key 的指纹部分就带着字体来源
+  // (`...#nofont` / `...#<内容哈希>` / `...#url<哈希>`),
+  // 字体来源一变就是**另一个作用域 key** → 照样会上报。
+  const mappable = unique.filter((g) => g.font);
+  const toReport = mappable.filter((g) => shouldReportScope(state, g.scopeKey));
   if (toReport.length === 0) return 'same';
   state.pending = { groups: toReport };
   const now = Date.now();
-  // 记住报过的分组：**重试时要用它的字体来源**（不然 App 拿不到字体文件）。
+  // 记住报过的分组：**重试时要用它的字体来源**(不然 App 拿不到字体文件)。
   const keep = new Map<string, PendingBatch['groups'][number]>();
   for (const g of state.reportedGroups) keep.set(g.scopeKey, g);
   for (const g of toReport) {
-    // 诊断：这个作用域最后一次上报的时刻。
+    // 诊断:这个作用域最后一次上报的时刻。
     state.reportedAt[g.scopeKey] = now;
     keep.set(g.scopeKey, g);
   }
   state.reportedGroups = [...keep.values()].slice(-12);
-  log(state, 'pending', {
-    kind,
-    groups: toReport.length,
-    chars: toReport.reduce((n, g) => n + g.chars.length, 0),
-    fonts: toReport.map((g) => (g.font ? g.font.kind : 'none')),
-    prefetch: toReport.filter((g) => g.prefetch).length,
-  });
+  // **内容没变就不重复记**(见 lastPendingSig 的说明)。
+  const sig = `${kind}|${toReport.map((g) => g.scopeKey).join(',')}`;
+  if (sig !== lastPendingSig) {
+    lastPendingSig = sig;
+    log(state, 'pending', {
+      kind,
+      groups: toReport.length,
+      chars: toReport.reduce((n, g) => n + g.chars.length, 0),
+      fonts: toReport.map((g) => (g.font ? g.font.kind : 'none')),
+      prefetch: toReport.filter((g) => g.prefetch).length,
+    });
+  }
   reportToTop(state, 'pending', { groups: toReport });
   return 'new';
 }

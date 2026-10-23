@@ -1,11 +1,12 @@
 (() => {
   // packages/browser-adapters/shared/src/page-guard.ts
-  var GUARD_VERSION = 9;
+  var GUARD_VERSION = 10;
   var API = "__copyRepairGuard";
   function log(state, event, data) {
     state.log.push({ at: Date.now(), event, data });
     if (state.log.length > 200) state.log.splice(0, state.log.length - 200);
   }
+  var lastPendingSig = null;
   function splitFamilies(fontFamily) {
     const out = [];
     let current = "";
@@ -160,7 +161,8 @@
       seen.add(g.scopeKey);
       unique.push(g);
     }
-    const toReport = unique.filter((g) => shouldReportScope(state, g.scopeKey));
+    const mappable = unique.filter((g) => g.font);
+    const toReport = mappable.filter((g) => shouldReportScope(state, g.scopeKey));
     if (toReport.length === 0) return "same";
     state.pending = { groups: toReport };
     const now = Date.now();
@@ -171,13 +173,17 @@
       keep.set(g.scopeKey, g);
     }
     state.reportedGroups = [...keep.values()].slice(-12);
-    log(state, "pending", {
-      kind,
-      groups: toReport.length,
-      chars: toReport.reduce((n, g) => n + g.chars.length, 0),
-      fonts: toReport.map((g) => g.font ? g.font.kind : "none"),
-      prefetch: toReport.filter((g) => g.prefetch).length
-    });
+    const sig = `${kind}|${toReport.map((g) => g.scopeKey).join(",")}`;
+    if (sig !== lastPendingSig) {
+      lastPendingSig = sig;
+      log(state, "pending", {
+        kind,
+        groups: toReport.length,
+        chars: toReport.reduce((n, g) => n + g.chars.length, 0),
+        fonts: toReport.map((g) => g.font ? g.font.kind : "none"),
+        prefetch: toReport.filter((g) => g.prefetch).length
+      });
+    }
     reportToTop(state, "pending", { groups: toReport });
     return "new";
   }
