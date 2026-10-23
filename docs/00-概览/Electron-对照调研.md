@@ -218,9 +218,12 @@ Electron 线仍问(那条路要一份用户从没被授予过的授权)。
 ### 这一轮新增的回归测试
 
 - `判活查询不依赖SystemEvents`(Rust)—— 钉死"不许出现 System Events / tell application"
-- `tools/verify/verify-frame-bridge.cjs`(Node,3 个用例)—— 纯 node 造一棵假 frame 树,
+- `tools/verify/verify-frame-bridge.cjs`(Node,6 个用例)—— 纯 node 造一棵假 frame 树,
   模拟"站点换掉 iframe",断言**新那层必须收到映射**。
-  **同一个测试拿修复前的 frame-bridge.js 跑会红**(3 个用例红 2 个)—— 不是假通过。
+  同一套用例跑两遍:**入库产物**(真正装进 App 的那份)与**源码现编**(真身)——
+  产物是手工从 `vendor/` 复制过去的,没有东西保证它们同步。
+  **把修复前的版本分别塞回去,各自那 3 个用例红 2 个**—— 不是假通过。
+  已接进 CI 门禁(跑不过就不发包)。
 - 诊断新增 `mappingScopes`(逐作用域记映射结果)、`safariRunning`、`runningProbe` 三个字段。
 
 ---
