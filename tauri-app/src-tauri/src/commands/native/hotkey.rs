@@ -571,11 +571,22 @@ pub fn stop() {
     }
 }
 
+/// latch 当前是不是**武装着**(诊断用)。
+///
+/// 诊断口径:「按了快捷键没反应」有两种完全不同的原因 ——
+/// ① 系统没把事件送来 / 修饰键不对 ⇒ latch 是武装的,但压根没匹配上;
+/// ② latch 还锁着(Control 一直没松开)⇒ **这是设计如此**,等用户松开 Control。
+/// 有了这一栏,一眼就能分清是哪一种。
+pub fn latch_armed() -> bool {
+    state().lock().map(|s| s.latch.is_armed()).unwrap_or(false)
+}
+
 /// 供运行自检读:当前状态。
 pub fn diagnostics() -> serde_json::Value {
     serde_json::json!({
         "alive": is_alive(),
         "error": last_error(),
+        "latchArmed": latch_armed(),
     })
 }
 
