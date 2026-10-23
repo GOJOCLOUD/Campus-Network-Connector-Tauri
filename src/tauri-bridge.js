@@ -124,6 +124,14 @@ function installTauriBridge() {
           rootPadTop: rootCs ? rootCs.paddingTop : null,
           innerWidth: window.innerWidth,
           innerHeight: window.innerHeight,
+          // 窗口在屏幕上的位置与尺寸 —— 和原生侧的「排除矩形」对账用。
+          // (录制时点自己界面上的按钮不算一次点击,靠的就是那个矩形。)
+          windowRect: {
+            screenX: window.screenX,
+            screenY: window.screenY,
+            outerWidth: window.outerWidth,
+            outerHeight: window.outerHeight,
+          },
           cardRect: rect ? { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) } : null,
           // 白圈判定:卡片与窗口四边的间隙
           ringLeft: rect ? Math.round(rect.x) : null,
@@ -324,9 +332,14 @@ function installTauriBridge() {
     },
 
     // Recording(CGEventTap,macOS 专有;Windows 线按 ADR-0012 不做录制)
-    startRecording: async (excludeRect) => {
+    //
+    // 「点自己界面上的按钮不算一次点击」由**原生层**负责:排除矩形用原生
+    // 窗口位置算,并且在窗口每次移动/变高时刷新(见 native/recording.rs)。
+    // 所以这里**不传**矩形 —— 前端那份 `window.screenX` 只是开始录制时的
+    // 一张快照,窗口一动就过期了(点「结束」会被记成一次点击)。
+    startRecording: async () => {
       try {
-        const ok = await invoke('start_recording', { excludeRect: excludeRect || [0, 0, 0, 0] });
+        const ok = await invoke('start_recording');
         return ok === true;
       } catch (e) {
         // Electron 版主进程失败时返回 {error: msg},界面按这个形状显示
@@ -335,20 +348,18 @@ function installTauriBridge() {
     },
     stopRecording: async () => {
       try {
-        await invoke('stop_recording');
-      } catch (_) {
-        /* 停止失败也要把已录到的点击交回去 */
-      }
-      try {
-        const clicks = await invoke('get_recording_clicks');
-        await invoke('clear_recording_clicks');
+        // 命令直接返回已录到的点击(停止那一刻录到的最后一次点击只有这里拿得到)
+        const clicks = await invoke('stop_recording');
         return Array.isArray(clicks) ? clicks : [];
       } catch (_) {
-        return [];
+        // null = 失败。界面据此**保留**原来的记录,不清空。
+        return null;
       }
     },
     getRecordingClicks: () => invoke('get_recording_clicks').catch(() => []),
     clearRecordingClicks: () => invoke('clear_recording_clicks').catch(() => false),
+    // 删掉第 index 次点击(单条删除)
+    removeRecordingClick: (index) => invoke('remove_recording_click', { index }).catch(() => false),
     isRecording: () => invoke('is_recording').catch(() => false),
     tapFailed: () => invoke('tap_failed').catch(() => false),
 

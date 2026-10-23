@@ -280,12 +280,11 @@ function App() {
       setCountdown(prev => {
         if (prev <= 1) {
           clearInterval(timer)
-          const left = window.screenX
-          const top = window.screenY
-          const right = left + window.outerWidth
-          const bottom = top + window.outerHeight
-          const excludeRect = [left, top, right, bottom]
-          cnc.startRecording(excludeRect)
+          // 「点自己界面上的按钮不算一次点击」由**原生层**负责:
+          // 排除矩形用原生窗口位置算,并在窗口每次移动/变高时刷新。
+          // 这里**不传**矩形 —— 前端那份 `window.screenX` 只是开始那一刻的
+          // 一张快照,窗口一动就过期了(点「结束」会被记成一次点击)。
+          cnc.startRecording()
             .then((ok) => {
               if (ok === true) {
                 setIsRecording(true)
@@ -307,7 +306,20 @@ function App() {
     cnc.stopRecording()
       .then((clickData) => {
         setIsRecording(false)
-        setMessage('录制已停止（返回 ' + (Array.isArray(clickData) ? clickData.length : 0) + ' 个点击）')
+        // null = 停止失败(这时**别**把界面上的记录清掉);
+        // 数组 = 原生那边拿到的点击。
+        // 停止那一刻录到的最后一次点击只有原生那边有(界面是 100ms 轮询,
+        // 可能差最后一次),所以以它为准。
+        const list = Array.isArray(clickData) ? clickData : null
+        if (list) {
+          setClicks(list)
+          setClickInputs(prev => {
+            const next = [...prev]
+            for (let i = 0; i < list.length; i += 1) next[i] = next[i] || ''
+            return next.slice(0, list.length)
+          })
+        }
+        setMessage('录制已停止（返回 ' + (list ? list.length : clicks.length) + ' 个点击）')
         setTimeout(() => setMessage(''), 1000)
       })
       .catch(() => { setMessage('停止失败'); setTimeout(() => setMessage(''), 1000) })
@@ -327,6 +339,16 @@ function App() {
         setTimeout(() => setMessage(''), 1000)
       })
       .catch(() => { setMessage('清空失败'); setTimeout(() => setMessage(''), 1000) })
+  }
+
+  // 单条删除:界面上每一条点击旁边有个「×」,点它只删这一条。
+  // 原生那边也要删**同一条** —— 两边都留着就对不上号了
+  // (原生那份是回放时真正用的)。
+  const handleDeleteClick = (index) => {
+    if (!(index >= 0 && index < clicks.length)) return
+    if (cnc.removeRecordingClick) cnc.removeRecordingClick(index)
+    setClicks(prev => prev.filter((_, i) => i !== index))
+    setClickInputs(prev => prev.filter((_, i) => i !== index))
   }
 
   const handleDefaultExecute = () => {
@@ -541,6 +563,7 @@ function App() {
     onManage: handleManage,
     onSave: handleSaveWithInputs,
     onClear: handleClear,
+    onDeleteClick: handleDeleteClick,
     jsonFiles,
     onRename: handleRename,
     onDelete: handleDelete,

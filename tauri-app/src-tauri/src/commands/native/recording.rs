@@ -46,9 +46,22 @@ struct Recorder {
     clicks: Mutex<Vec<ClickEvent>>,
     recording: AtomicBool,
     tap_failed: AtomicBool,
-    /// 自身窗口矩形 `[left, top, right, bottom]`,落在这个范围里的点击不记
+    /// 自身窗口矩形 `[left, top, right, bottom]`(屏幕全局坐标,
+    /// **逻辑点**、左上角为原点),落在这个范围里的点击不记。
+    ///
+    /// **这个矩形必须始终是最新的**,不能只在开始录制时拍一张快照:
+    /// ① Tauri 的窗口是**贴合内容**的 —— 录制列表一出现,内容变高,
+    ///    窗口就**向上长**(Cocoa 的 setContentSize 固定的是左下角),
+    ///    顶边跟着往上跑,「结束」按钮于是跑出了开始时那张快照;
+    /// ② 窗口还能被用户拖走。
+    /// 结果就是:点自己界面上的按钮(尤其「结束」)被当成一次外部点击记下来。
+    ///
+    /// 现在由 App 层在窗口**每次移动/变高**时刷新(见 lib.rs 的 on_window_event),
+    /// 点击判定用的永远是当前这一张。
     exclude: Mutex<Option<[f64; 4]>>,
     start: Mutex<Option<Instant>>,
+    /// 最近一次「点自己界面上的按钮会不会被记成一次点击」自检的结果
+    diag_result: Mutex<Option<serde_json::Value>>,
     /// 录制线程的 run loop —— 停止录制时从别的线程叫醒它
     run_loop: Mutex<Option<CFRunLoop>>,
 }
@@ -62,30 +75,77 @@ fn recorder() -> &'static Arc<Recorder> {
             tap_failed: AtomicBool::new(false),
             exclude: Mutex::new(None),
             start: Mutex::new(None),
+            diag_result: Mutex::new(None),
             run_loop: Mutex::new(None),
         })
     })
 }
 
 /// 点是否落在排除矩形内。
-fn in_exclude(rect: &Option<[f64; 4]>, x: f64, y: f64) -> bool {
+///
+/// 边界按**闭区间**算(和 Electron 版 `CGRectContainsPoint` 一致):
+/// 正好点在窗口边上也算「在窗口里」,不记。
+pub fn in_exclude(rect: &Option<[f64; 4]>, x: f64, y: f64) -> bool {
     match rect {
         Some(r) => x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3],
         None => false,
     }
 }
 
+/// 由窗口的**物理**位置/尺寸算出排除矩形,换算成**逻辑点**、左上角为原点。
+///
+/// 为什么必须换算:CGEvent 报的位置是**逻辑点**、左上角为原点;
+/// 而 Tauri 报的窗口位置/尺寸是**物理像素**。不除以缩放系数的话,
+/// Retina 屏(缩放 2)上矩形会大一倍 —— 半个屏幕的点击都会被当成"点在自己身上"。
+///
+/// `scale <= 0` 视为 1(缩放系数拿不到时不要把矩形算成空)。
+pub fn rect_from_physical(x: f64, y: f64, width: f64, height: f64, scale: f64) -> [f64; 4] {
+    let s = if scale > 0.0 { scale } else { 1.0 };
+    let left = x / s;
+    let top = y / s;
+    [left, top, left + width / s, top + height / s]
+}
+
+/// 设置排除矩形(自身窗口的屏幕坐标范围)。
+///
+/// 由 App 层在窗口移动/变高时调用,保证矩形始终是当前的。
+pub fn set_exclude_rect(rect: Option<[f64; 4]>) {
+    *recorder().exclude.lock().unwrap() = rect;
+}
+
+/// 当前的排除矩形(诊断用:界面上看不出来,只能从这里查)。
+pub fn exclude_rect() -> Option<[f64; 4]> {
+    *recorder().exclude.lock().unwrap()
+}
+
+/// 从列表里删掉第 index 条(越界就什么都不做,返回有没有删掉)。
+///
+/// 单条删除:界面上每一条点击旁边有个「×」,点它只删这一条。
+pub fn remove_at(clicks: &mut Vec<ClickEvent>, index: usize) -> bool {
+    if index >= clicks.len() {
+        return false;
+    }
+    clicks.remove(index);
+    true
+}
+
+/// 删掉已录到的第 index 次点击。
+pub fn remove_click(index: usize) -> bool {
+    let mut clicks = recorder().clicks.lock().unwrap();
+    remove_at(&mut clicks, index)
+}
+
 /// 开始录制。
 ///
-/// `exclude_rect` 是自身窗口的 `[left, top, right, bottom]`(屏幕全局坐标),
-/// 用来避免把"点开始录制"这个动作也录进去。
-pub fn start_recording(exclude_rect: Option<[f64; 4]>) -> Result<bool, String> {
+/// 排除矩形(自身窗口的范围)**不在这里传**:它由 App 层用原生窗口位置算好,
+/// 并在窗口每次移动/变高时刷新(见 `set_exclude_rect` 与 lib.rs 的窗口事件)。
+/// 在这里拍快照的话,窗口一动快照就过期了 —— 见 `Recorder::exclude` 的说明。
+pub fn start_recording() -> Result<bool, String> {
     let rec = recorder().clone();
     if rec.recording.load(Ordering::SeqCst) {
         return Err("已经在录制中".to_string());
     }
 
-    *rec.exclude.lock().unwrap() = exclude_rect;
     rec.clicks.lock().unwrap().clear();
     *rec.start.lock().unwrap() = Some(Instant::now());
     rec.tap_failed.store(false, Ordering::SeqCst);
@@ -245,4 +305,150 @@ pub fn is_recording() -> bool {
 /// 事件监听有没有失败(权限不足 / 被系统禁用)。
 pub fn tap_failed() -> bool {
     recorder().tap_failed.load(Ordering::SeqCst)
+}
+
+/// 往指定位置发一个**合成**的左键点击(自检用)。
+///
+/// 返回有没有真的发出去 —— 发不出去(系统没给「辅助功能」权限)时,
+/// 这次自检**测不了**(别把它当成"通过")。
+pub fn post_synthetic_click(x: f64, y: f64) -> bool {
+    use core_graphics::event::{CGEvent, CGMouseButton, CGEventType};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
+
+    let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let point = CGPoint::new(x, y);
+    let down = match CGEvent::new_mouse_event(
+        source.clone(),
+        CGEventType::LeftMouseDown,
+        point,
+        CGMouseButton::Left,
+    ) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let up = match CGEvent::new_mouse_event(
+        source,
+        CGEventType::LeftMouseUp,
+        point,
+        CGMouseButton::Left,
+    ) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    down.post(CGEventTapLocation::HID);
+    up.post(CGEventTapLocation::HID);
+    true
+}
+
+/// 自检:「点自己界面上的按钮,会不会被记成一次点击」。
+///
+/// 做的是一组**对照**,同一个位置、同一个合成点击,只换排除矩形:
+/// ① 把排除矩形**关掉** → 这个点击**应该**被记下来
+///    (证明事件监听确实收到了合成点击;没收到 = 这次测不了,不是"通过");
+/// ② 把排除矩形设成**当前窗口** → 这个点击**不应该**被记下来。
+///
+/// 返回:
+/// - `control`  = ①记下来的条数(正常 1;0 = 合成点击没被监听到,测不了)
+/// - `excluded` = ②记下来的条数(正常 0)
+/// - `posted`   = 合成点击有没有真的发出去(需要「辅助功能」权限)
+/// - `conclusive` = 这次自检**有没有结论**(control > 0 才有)
+pub fn diagnose_exclusion(rect: Option<[f64; 4]>, point: (f64, f64)) -> serde_json::Value {
+    let rec = recorder();
+
+    // ① 对照组:不排除 —— 合成点击应该被记下来
+    set_exclude_rect(None);
+    let _ = start_recording();
+    thread::sleep(Duration::from_millis(120));
+    let posted1 = post_synthetic_click(point.0, point.1);
+    thread::sleep(Duration::from_millis(250));
+    let control = rec.clicks.lock().unwrap().len();
+    stop_recording();
+    rec.clicks.lock().unwrap().clear();
+
+    // ② 实验组:排除矩形 = 当前窗口 —— 合成点击不应该被记下来
+    set_exclude_rect(rect);
+    let _ = start_recording();
+    thread::sleep(Duration::from_millis(120));
+    let posted2 = post_synthetic_click(point.0, point.1);
+    thread::sleep(Duration::from_millis(250));
+    let excluded = rec.clicks.lock().unwrap().len();
+    stop_recording();
+    rec.clicks.lock().unwrap().clear();
+    set_exclude_rect(rect);
+
+    serde_json::json!({
+        "control": control,
+        "excluded": excluded,
+        "posted": posted1 && posted2,
+        "conclusive": control > 0,
+        "rect": rect,
+        "point": [point.0, point.1],
+    })
+}
+
+/// 最近一次自检的结果(写进 diag.json,好让「界面上看不出来」的事有据可查)。
+pub fn set_diag_result(value: serde_json::Value) {
+    *recorder().diag_result.lock().unwrap() = Some(value);
+}
+
+/// 最近一次自检的结果。
+pub fn diag_result() -> Option<serde_json::Value> {
+    recorder().diag_result.lock().unwrap().clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn click(x: f64, y: f64) -> ClickEvent {
+        ClickEvent {
+            x,
+            y,
+            timestamp: 0.0,
+        }
+    }
+
+    #[test]
+    fn 物理像素要换算成逻辑点() {
+        // 缩放 1:原样
+        assert_eq!(rect_from_physical(10.0, 20.0, 300.0, 400.0, 1.0), [10.0, 20.0, 310.0, 420.0]);
+        // 缩放 2(Retina):物理像素是一倍,逻辑点不变
+        assert_eq!(rect_from_physical(20.0, 40.0, 600.0, 800.0, 2.0), [10.0, 20.0, 310.0, 420.0]);
+        // 缩放系数拿不到(0 或负数)时按 1 算,不能算成空矩形
+        assert_eq!(rect_from_physical(10.0, 20.0, 300.0, 400.0, 0.0), [10.0, 20.0, 310.0, 420.0]);
+    }
+
+    #[test]
+    fn 窗口范围内的点击要被排除() {
+        let rect = Some([100.0, 200.0, 300.0, 400.0]);
+        // 窗口里面
+        assert!(in_exclude(&rect, 150.0, 250.0));
+        // 正好在边上(闭区间,和 Electron 的 CGRectContainsPoint 一致)
+        assert!(in_exclude(&rect, 100.0, 200.0));
+        assert!(in_exclude(&rect, 300.0, 400.0));
+        // 窗口外面
+        assert!(!in_exclude(&rect, 99.0, 250.0));
+        assert!(!in_exclude(&rect, 150.0, 401.0));
+        // 没有矩形(拿不到窗口位置)时一律不排除
+        assert!(!in_exclude(&None, 150.0, 250.0));
+    }
+
+    #[test]
+    fn 单条删除只删那一条() {
+        let mut clicks = vec![click(1.0, 1.0), click(2.0, 2.0), click(3.0, 3.0)];
+        assert!(remove_at(&mut clicks, 1));
+        assert_eq!(clicks.len(), 2);
+        assert_eq!(clicks[0].x, 1.0);
+        assert_eq!(clicks[1].x, 3.0);
+        // 越界不删,也不能崩
+        assert!(!remove_at(&mut clicks, 9));
+        assert_eq!(clicks.len(), 2);
+        // 空列表
+        let mut empty: Vec<ClickEvent> = Vec::new();
+        assert!(!remove_at(&mut empty, 0));
+    }
 }

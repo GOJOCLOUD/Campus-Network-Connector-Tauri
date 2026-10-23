@@ -167,7 +167,18 @@ function StepContentWrapper({
 
   return (
     <motion.div
-      style={{ position: 'relative', overflowY: 'auto', maxHeight: '65vh' }}
+      // **横向不许滚**(`overflow-x: hidden`)。
+      //
+      // 为什么必须写死:overflowY 是 auto 时,按 CSS 规范另一个轴的 visible
+      // 会被**算成 auto** —— 也就是横向其实也能滚。切页时正在退场的那一页
+      // 会往右滑(`x: '50%'`),横向就溢出了,内容区**底下**于是冒出一条
+      // 横向滚动条,滚块跟着画面一起「滑动」——用户说的「下面那条滑条」
+      // 就是它(不是顶上步骤圈之间的那条紫色进度线)。
+      //
+      // 改成 hidden 之后:横向那条滚动条没了,画面「直接划过去」的动画
+      // **一点没变** —— 溢出到右边的那部分本来就在可视区外(scrollLeft
+      // 一直是 0),看不见,只是多出一条能把它滑出来的滚动条。
+      style={{ position: 'relative', overflowX: 'hidden', overflowY: 'auto', maxHeight: '65vh' }}
       animate={{ height: isCompleted ? 0 : parentHeight }}
       transition={{ type: 'spring', duration: 0.4 }}
       className={className}

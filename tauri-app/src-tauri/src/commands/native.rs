@@ -173,26 +173,59 @@ pub fn clipboard_write_text(text: String) -> Result<(), String> {
 //   startRecording / stopRecording / getRecordingClicks /
 //   clearRecordingClicks / isRecording / tapFailed
 
-/// 开始录制(监听左键点击)。
+/// 自身窗口的屏幕坐标范围(排除矩形)。
 ///
-/// `exclude_rect` = 自身窗口的 `[left, top, right, bottom]`(屏幕全局坐标),
-/// 用来避免把"点开始录制"这个动作也录进去。
-#[tauri::command]
-pub fn start_recording(exclude_rect: Option<Vec<f64>>) -> Result<bool, String> {
-    let rect = exclude_rect.and_then(|v| {
-        if v.len() == 4 {
-            Some([v[0], v[1], v[2], v[3]])
-        } else {
-            None
-        }
-    });
-    rec::start_recording(rect)
+/// 用**原生**窗口的位置和尺寸算,不用前端的 `window.screenX`:
+/// ① WKWebView 里那套值不一定准;
+/// ② 它是「开始录制那一刻」的一次快照,而 Tauri 的窗口是**贴合内容**的
+///    —— 录制列表一出现,窗口就往上长,「结束」按钮就跑出了那张快照,
+///    点「结束」自己会被记成一次点击。
+///
+/// 换算成**逻辑点**、左上角为原点,和 CGEvent 报的位置同一套坐标系
+/// (见 `rec::rect_from_physical`)。
+#[cfg(target_os = "macos")]
+pub fn window_exclude_rect(app: &tauri::AppHandle) -> Option<[f64; 4]> {
+    use tauri::Manager;
+    let win = app.get_webview_window("main")?;
+    let scale = win.scale_factor().ok()?;
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size().ok()?;
+    Some(rec::rect_from_physical(
+        pos.x as f64,
+        pos.y as f64,
+        size.width as f64,
+        size.height as f64,
+        scale,
+    ))
 }
 
-/// 停止录制。
+#[cfg(not(target_os = "macos"))]
+pub fn window_exclude_rect(_app: &tauri::AppHandle) -> Option<[f64; 4]> {
+    None
+}
+
+/// 开始录制(监听左键点击)。
+///
+/// 「点自己界面上的按钮不算一次点击」靠**排除矩形**实现:
+/// 矩形用原生窗口位置算好,并在窗口每次移动/变高时刷新(见 lib.rs 的窗口事件)。
 #[tauri::command]
-pub fn stop_recording() -> bool {
-    rec::stop_recording()
+pub fn start_recording(app: tauri::AppHandle) -> Result<bool, String> {
+    rec::set_exclude_rect(window_exclude_rect(&app));
+    rec::start_recording()
+}
+
+/// 停止录制,并把已录到的点击交回去。
+///
+/// 返回数组而不是 bool:界面要显示"返回 N 个点击",
+/// 而且停止那一刻录到的最后一次点击只有这里拿得到(界面那边是 100ms 轮询,
+/// 可能差最后一次)。
+#[tauri::command]
+pub fn stop_recording() -> Vec<serde_json::Value> {
+    rec::stop_recording();
+    rec::get_recording_clicks()
+        .into_iter()
+        .map(|c| serde_json::json!({ "x": c.x, "y": c.y, "timestamp": c.timestamp }))
+        .collect()
 }
 
 /// 已录到的点击:`[{x, y, timestamp}]`,timestamp 是距录制开始的秒数。
@@ -208,6 +241,33 @@ pub fn get_recording_clicks() -> Vec<serde_json::Value> {
 #[tauri::command]
 pub fn clear_recording_clicks() -> bool {
     rec::clear_recording_clicks()
+}
+
+/// 删掉第 index 次点击(单条删除)。
+#[tauri::command]
+pub fn remove_recording_click(index: usize) -> bool {
+    rec::remove_click(index)
+}
+
+/// 当前排除矩形(诊断用:界面上看不出来)。
+#[tauri::command]
+pub fn recording_exclude_rect() -> Option<Vec<f64>> {
+    rec::exclude_rect().map(|r| vec![r[0], r[1], r[2], r[3]])
+}
+
+/// 自检:「点自己界面上的按钮,会不会被记成一次点击」。
+///
+/// 往**自己窗口内**发一个合成点击(落在左侧透明边距上,不碰任何按钮),
+/// 看它会不会被记成一次点击。带一组对照,详见 `rec::diagnose_exclusion`。
+#[tauri::command]
+pub fn diagnose_recording_exclusion(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let rect = window_exclude_rect(&app).ok_or("拿不到窗口位置")?;
+    // 窗口左侧那条透明边距(根容器有 px-2,红绿灯在 y=12 附近)——
+    // 点这里没有任何副作用,又确实在窗口范围内。
+    let point = (rect[0] + 4.0, rect[1] + 60.0);
+    let result = rec::diagnose_exclusion(Some(rect), point);
+    rec::set_diag_result(result.clone());
+    Ok(result)
 }
 
 /// 是否正在录制。

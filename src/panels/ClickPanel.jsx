@@ -19,6 +19,7 @@ export default function ClickPanel({
   onManage,
   onSave,
   onClear,
+  onDeleteClick,
   jsonFiles,
   onRename,
   onDelete,
@@ -65,7 +66,18 @@ export default function ClickPanel({
                         <ul className="space-y-1 max-h-48 overflow-auto">
                           {clicks.map((click, index) => (
                             <li key={index} className="text-sm flex flex-col space-y-1">
-                              <span>第{index + 1}次: ({Math.round(click.x)}, {Math.round(click.y)})</span>
+                              <div className="flex items-center justify-between gap-2">
+                                <span>第{index + 1}次: ({Math.round(click.x)}, {Math.round(click.y)})</span>
+                                {/* 单条删除:点这个「×」只删这一条。
+                                    整条清空另有「清空」按钮(那个是全清)。 */}
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteClick(index)}
+                                  title={`删除第${index + 1}次点击`}
+                                  aria-label={`删除第${index + 1}次点击`}
+                                  className="shrink-0 rounded px-1 text-gray-400 transition hover:bg-gray-300 hover:text-red-500"
+                                >×</button>
+                              </div>
                               <input type="text"
                                 value={clickInputs[index] || ''}
                                 onChange={e => onClickInputChange(index, e.target.value)}

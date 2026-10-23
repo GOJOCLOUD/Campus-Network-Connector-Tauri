@@ -92,6 +92,12 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "recording": commands::native::rec::is_recording(),
                     "recordingClicks": commands::native::rec::get_recording_clicks().len(),
                     "tapFailed": commands::native::rec::tap_failed(),
+                    // 录制时的「排除矩形」(自身窗口的屏幕坐标范围)——
+                    // 落在它里面的点击不记。没它就没法查
+                    // "点自己界面上的按钮为什么被记成一次点击"。
+                    "recordingExcludeRect": commands::native::rec::exclude_rect(),
+                    // 最近一次「点自己界面上的按钮会不会被记成一次点击」自检的结果
+                    "recordingExclusionCheck": commands::native::rec::diag_result(),
                 }),
             );
             // 最近一次回放:执行了几条、为什么没执行
@@ -494,6 +500,9 @@ pub fn run() {
             nativecmd::stop_recording,
             nativecmd::get_recording_clicks,
             nativecmd::clear_recording_clicks,
+            nativecmd::remove_recording_click,
+            nativecmd::recording_exclude_rect,
+            nativecmd::diagnose_recording_exclusion,
             nativecmd::is_recording,
             nativecmd::tap_failed,
             commands::play::play_file,
@@ -530,6 +539,47 @@ pub fn run() {
             // 会**直接失效** → 表现为"拖不动"。启动时主动抢一次焦点即可。
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
+            }
+            // 录制用的「排除矩形」必须**跟着窗口走**。
+            //
+            // 「点自己界面上的按钮不算一次点击」靠它实现:落在自己窗口范围内的
+            // 点击不记。矩形不能只在开始录制时拍一张快照 ——
+            // ① 窗口是**贴合内容**的:录制列表一出现,内容变高,窗口**向上长**
+            //    (Cocoa 的 setContentSize 固定的是左下角),顶边跟着往上跑,
+            //    「结束」按钮于是跑出了开始时那张快照 → 点「结束」自己被记一次;
+            // ② 窗口还能被用户拖走。
+            // 所以窗口**每次移动/变高**都刷新一次,点击判定用的永远是当前这张。
+            //
+            // (Electron 版同口径:主进程监听窗口的 move/resize 事件刷新矩形。)
+            if let Some(w) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                w.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                        if let Some(rect) = nativecmd::window_exclude_rect(&handle) {
+                            nativecmd::rec::set_exclude_rect(Some(rect));
+                        }
+                    }
+                    _ => {}
+                });
+            }
+            // 启动参数带 `--diag-recording-exclusion` 时,跑一次
+            // 「点自己界面上的按钮会不会被记成一次点击」的自检,
+            // 结果写进 diag.json(native.recordingExclusionCheck)。
+            //
+            // 平时**不跑** —— 它会往自己窗口里发合成点击,
+            // 不该在用户正常用的时候发生。要查这件事时再手动带这个参数启动。
+            if std::env::args().any(|a| a == "--diag-recording-exclusion") {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    // 等窗口真的摆好(位置这时候才准)
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    let result =
+                        nativecmd::diagnose_recording_exclusion(handle.clone()).unwrap_or_else(
+                            |e| serde_json::json!({ "error": e }),
+                        );
+                    eprintln!("[diag] 录制排除自检: {}", result);
+                    nativecmd::rec::set_diag_result(result);
+                });
             }
             // 注册全局快捷键。
             //

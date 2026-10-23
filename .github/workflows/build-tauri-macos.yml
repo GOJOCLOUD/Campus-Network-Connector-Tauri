@@ -50,6 +50,16 @@ jobs:
       - name: page-guard regression test
         run: node --test tools/verify/verify-page-guard.cjs
 
+      # 硬门禁:界面层的回归(跑不过就不发包)。
+      # - 换页时内容区**底下**那条横向滚动条不许再出现
+      #   (用户反馈「下面有个滑条在滑动」),画面横滑的动画不许丢;
+      # - 录制的**单条删除**,以及「点自己界面上的按钮不算一次点击」的契约
+      #   (开始录制不再由前端传那张会过期的矩形)。
+      # 这两条要读**构建出来的 dist/**(真正装进 App 的那份前端),
+      # 所以必须放在 "Build frontend" 之后。
+      - name: UI regression test
+        run: node --test tools/verify/verify-panel-transition.cjs tools/verify/verify-recording-ui.cjs
+
       # 参考库(glyph-db-48.crdb.gz)与页面守卫是**提交进仓库**的构建产物,
       # 这里不需要重建；要重建用 npm run build:reference-db / build:vendor。
       #
