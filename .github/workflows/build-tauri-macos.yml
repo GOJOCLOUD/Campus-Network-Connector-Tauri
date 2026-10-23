@@ -32,6 +32,15 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # 硬门禁:frame-bridge 的回归测试(跑不过就不发包)。
+      # 盯的是"站点换掉嵌套 iframe 之后,映射还能不能送到新那层"——
+      # 2026-10-23 真机故障就是这个:frame 名单过期 → 题目那层一份映射都收不到
+      # → 复制出来还是密文。
+      # 同一套用例跑两遍:**入库产物**(真正装进 App 的那份)与**源码现编**(真身),
+      # 防止源码改了而产物忘了同步 —— 那是静默漂移,别的地方发现不了。
+      - name: frame-bridge regression test
+        run: node --test tools/verify/verify-frame-bridge.cjs
+
       # 参考库(glyph-db-48.crdb.gz)与页面守卫是**提交进仓库**的构建产物,
       # 这里不需要重建；要重建用 npm run build:reference-db / build:vendor。
       #
