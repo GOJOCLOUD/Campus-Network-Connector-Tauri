@@ -173,6 +173,25 @@ pub fn run_clicks(
     interval: f64,
     inputs: Option<&[Option<String>]>,
 ) -> (usize, usize, String) {
+    run_clicks_with(clicks, interval, inputs, native::mouse_click)
+}
+
+/// 同 `run_clicks`,但**点击怎么发由调用方决定**。
+///
+/// 为什么要留这个口子:**单测不能真的往屏幕上点**。
+/// 直接用 `native::mouse_click` 的话,单测在**有**「辅助功能」权限的机器上
+/// (比如 CI runner)会真的把点击发出去 —— 既污染环境,又让断言依赖环境
+/// (「发不出去」这种假设在 CI 上不成立,2026-10-23 就踩过)。
+/// 单测传一个假的发送器:零副作用、跨环境稳定。
+fn run_clicks_with<F>(
+    clicks: &[Value],
+    interval: f64,
+    inputs: Option<&[Option<String>]>,
+    mut send: F,
+) -> (usize, usize, String)
+where
+    F: FnMut(f64, f64) -> Result<bool, String>,
+{
     let gap_ms = MIN_GAP_MS.max((interval.max(0.0) * 1000.0) as u64);
     let mut executed = 0usize;
     let mut skipped = 0usize;
@@ -186,7 +205,7 @@ pub fn run_clicks(
             // 落点在自己窗口上 ⇒ **不发**。发出去就是点自己界面的按钮。
             skipped += 1;
         } else {
-            match native::mouse_click(x, y) {
+            match send(x, y) {
                 Ok(_) => executed += 1,
                 Err(e) => {
                     // 第一次失败就记下来,但**继续往下走** —— 后面的点击可能还是能发
@@ -371,6 +390,10 @@ mod tests {
     }
 
     /// 落点在自己窗口上的点击**不发出去**(否则就是自激循环的燃料)。
+    ///
+    /// 用**假的发送器**:不真的往屏幕上点。
+    /// (2026-10-23 踩过:原来直接调 `native::mouse_click`,在**有**辅助功能权限的
+    /// 机器上 —— 比如 CI runner —— 会真的点出去,断言也跟着环境漂。)
     #[test]
     fn 落点在自己窗口的点击被丢掉() {
         // 假装自己窗口在 (100,100)-(200,200)
@@ -379,12 +402,19 @@ mod tests {
             json!({"x": 150.0, "y": 150.0}), // 在窗口里 → 丢掉
             json!({"x": 500.0, "y": 500.0}), // 在窗口外 → 照常发
         ];
-        let (executed, skipped, _err) = run_clicks(&clicks, 0.0, None);
+        let mut sent: Vec<(f64, f64)> = Vec::new();
+        let (executed, skipped, _err) = run_clicks_with(&clicks, 0.0, None, |x, y| {
+            sent.push((x, y));
+            Ok(true)
+        });
         native::rec::set_exclude_rect(None);
         assert_eq!(skipped, 1, "落在自己窗口上的那一条必须被丢掉");
-        // 第二条在窗口外:单测进程没有「辅助功能」权限 ⇒ 发不出去(executed=0),
-        // 但它**不能**被算成 skipped —— 说明确实尝试发了。
-        assert_eq!(executed, 0, "窗口外的点击要真的去发(这里发不出去是没权限)");
+        assert_eq!(executed, 1, "窗口外的那一条要真的去发");
+        assert_eq!(
+            sent,
+            vec![(500.0, 500.0)],
+            "只有窗口外那一条真的发出去了,窗口内那条**一个字节都不能发**"
+        );
     }
 }
 
