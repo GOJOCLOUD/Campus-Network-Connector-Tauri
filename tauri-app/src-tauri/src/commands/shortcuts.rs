@@ -9,6 +9,7 @@
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::thread;
 use tauri::AppHandle;
 
 /// 最近若干次快捷键命中的记录(给运行自检看)。
@@ -59,6 +60,47 @@ pub fn record_shortcut_hit_detail(key: &str, outcome: &str, flags: Option<u64>) 
     });
 }
 
+/// 写 `shortcut-hits.json` 的锁(避免两次落盘互相覆盖)。
+static FLUSH_LOCK: Mutex<()> = Mutex::new(());
+
+/// 把最近的命中记录写到磁盘(app 数据目录下的 `shortcut-hits.json`)。
+///
+/// ## 为什么要有
+///
+/// 命中记录原来**只存在内存里**,要等前端调 `diag_report` 才会落盘 ——
+/// 而前端不调的时候(App 在后台、窗口没开)根本查不到。
+/// 「按了快捷键没反应」就是这样查不出来的:得先把窗口打开、点一下界面,
+/// 才看得到之前到底命中了没有、动作是哪一步失败的。
+///
+/// 落盘之后:**按一下就能查**。
+///
+/// ## ⚠️ 绝不能在 tap 回调线程里同步写
+///
+/// 文件 IO 是慢活,tap 回调慢一点系统会直接把这个 tap 关掉
+/// (快捷键间歇性失灵)。所以丢给别的线程去做。
+pub fn flush_hits_to_disk() {
+    let Some(app) = crate::commands::native::app_handle() else {
+        return;
+    };
+    thread::spawn(move || {
+        use tauri::Manager;
+        let Ok(dir) = app.path().app_data_dir() else {
+            return;
+        };
+        // 串行化写:后一次落盘的快照一定包含前一次(命中先进内存,再排队写)。
+        let _guard = FLUSH_LOCK.lock();
+        let _ = std::fs::create_dir_all(&dir);
+        let payload = serde_json::json!({
+            "updatedAtMs": crate::commands::app::now_ms(),
+            "hits": shortcut_hits(),
+        });
+        let _ = std::fs::write(
+            dir.join("shortcut-hits.json"),
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        );
+    });
+}
+
 /// 先落一条命中(输入源待回填),返回它的编号。
 fn push_hit(key: &str, outcome: &str, flags: Option<u64>) -> u64 {
     let id = HIT_SEQ.fetch_add(1, Ordering::SeqCst);
@@ -78,6 +120,8 @@ fn push_hit(key: &str, outcome: &str, flags: Option<u64>) -> u64 {
             v.drain(..drop);
         }
     }
+    // 立刻落盘 —— 别等前端调 `diag_report`(它不调的时候根本查不到)。
+    flush_hits_to_disk();
     id
 }
 
@@ -93,6 +137,8 @@ fn fill_hit_input_source(id: u64, label: &str) {
             }
         }
     }
+    // 回填完了再落一次 —— 这次磁盘上带上了输入源。
+    flush_hits_to_disk();
 }
 
 /// 最近 20 次快捷键命中(运行自检用)。

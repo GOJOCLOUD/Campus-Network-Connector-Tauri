@@ -16,7 +16,9 @@
 //! ## 自己监听能拿到什么
 //!
 //! - 匹配只看"**有没有** ⌃⇧ / ⌘⇧",多余的修饰键(Fn、⌥)一律忽略 ⇒ 容错变大;
-//! - **把按键吃掉**(返回 None)⇒ 别的应用收不到,绝不漏出 D;
+//! - **把按键吃掉**(把事件改成 `Null` 类型再交回去)⇒ 别的应用收不到,绝不漏出 D;
+//!   ⚠️ 2026-10-23 定位:老代码写的是「返回 None = 吞掉」,而 core-graphics 里
+//!   `None` 是**放行** —— 快捷键**从来没被吞过**,每一下都漏给了前台应用。
 //! - 被系统禁用(超时)后自己重建 tap ⇒ 不会"用着用着就没了";
 //! - 不依赖系统热键注册表 ⇒ 不会被别的进程抢走。
 //!
@@ -118,24 +120,58 @@ pub fn last_error() -> String {
     state().lock().map(|s| s.error.clone()).unwrap_or_default()
 }
 
-/// 事件是不是我们要的组合键。
+/// 把事件**丢弃** —— 别的应用收不到它。
+///
+/// ## ⚠️ 为什么不能直接 `return None`
+///
+/// core-graphics 的 tap 回调返回 `Option<CGEvent>`,语义是:
+/// - `None` = **原样放行**(不是"丢弃"!)
+/// - `Some(e)` = 用 `e` **替换**这个事件
+///
+/// 这个 API **没有"丢弃"这个选项**。想吞掉一个事件,得把它的类型
+/// 改成 `CGEventType::Null` 再交回去 —— 系统收到一个 null 事件,
+/// 就当什么都没发生过。
+///
+/// ## 这曾经是个真 bug(2026-10-23 定位)
+///
+/// 老代码的注释写着「返回 None = **吞掉**这个按键 ⇒ 别的应用收不到,
+/// 不会多打出 D」—— **这句是错的**:`None` 在 core-graphics 里是**放行**。
+/// 于是快捷键**从来没被吞过**:每一次 ⌃⇧A / ⌃⇧D 都完整漏给了前台应用。
+/// 用户看到的症状就是「多打出一个 D」(修饰键没被识别时前台收到的是 ⇧D,
+/// 直接打出大写 D)—— 这条原始投诉一直**没有**被真正修掉。
+fn swallow(event: &CGEvent) -> Option<CGEvent> {
+    let mut dead = event.clone();
+    dead.set_type(CGEventType::Null);
+    Some(dead)
+}
+
+/// 事件是不是我们要的组合键(**纯函数版**)。
+///
+/// 拆成纯函数是为了让单测**不碰系统**:单测在 CI 上没有「辅助功能」权限,
+/// 连构造事件源都可能失败,断言一旦依赖环境就会漂(2026-10-23 踩过这个坑)。
 ///
 /// 只看"有没有 ⌃⇧ / ⌘⇧":多带 Fn、⌥ 之类的一律忽略 —— 这正是系统热键做不到、
 /// 也是"必须按得极其精准"的来源。
-fn match_hotkey(event: &CGEvent) -> Option<Hotkey> {
-    let flags = event.get_flags();
+fn match_hotkey_raw(keycode: i64, flags: CGEventFlags) -> Option<Hotkey> {
     let shift = flags.contains(CGEventFlags::CGEventFlagShift);
     let ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
     let cmd = flags.contains(CGEventFlags::CGEventFlagCommand);
     if !shift || !(ctrl || cmd) {
         return None;
     }
-    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
     match keycode {
         KEY_A => Some(Hotkey::Execute),
         KEY_D => Some(Hotkey::Paste),
         _ => None,
     }
+}
+
+/// 事件是不是我们要的组合键。
+fn match_hotkey(event: &CGEvent) -> Option<Hotkey> {
+    match_hotkey_raw(
+        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+        event.get_flags(),
+    )
 }
 
 /// 启动快捷键监听(独立线程 + 自己的 run loop,和录制那一套一样)。
@@ -209,12 +245,15 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
         move |_proxy, etype, event| {
             match etype {
                 CGEventType::KeyDown => {
-                    // 长按时的自动重复:同一组合键不该反复触发
+                    // 长按时的自动重复:同一组合键不该反复触发。
+                    //
+                    // ⚠️ **但这个事件照样要吞掉** —— 放行的话,长按 ⌃⇧A 会一次次
+                    // 把 A 漏给前台应用(和"多打出一个 D"是同一类泄漏)。
                     if event
                         .get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT)
                         != 0
                     {
-                        return None;
+                        return swallow(event);
                     }
                     let keycode =
                         event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
@@ -234,7 +273,9 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                                 "命中(自检模式,没执行动作)",
                                 Some(flags as u64),
                             );
-                            return None;
+                            // 自检模式下也不放行 —— 否则"自检按一下"本身就会
+                            // 往前台漏一个按键(这正是 T0 事故的起点)。
+                            return swallow(event);
                         }
                         // 动作另起线程跑:tap 回调里不能做慢活,
                         // 超时系统会直接把这个 tap 关掉。
@@ -252,19 +293,34 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                             "命中(按键已吞掉)",
                             Some(flags as u64),
                         );
-                        // 返回 None = **吞掉这个按键** ⇒ 别的应用收不到,不会多打出 D
-                        return None;
+                        // **真正吞掉这个按键** ⇒ 别的应用收不到,不会多打出 D。
+                        //
+                        // ⚠️ 注意:返回 `None` 在 core-graphics 里是**放行**,
+                        // 不是"吞掉" —— 那样写的话快捷键从来没被吞过。
+                        // 见 `swallow` 的说明。
+                        return swallow(event);
                     }
                     None
                 }
                 CGEventType::KeyUp => {
                     let keycode =
                         event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                    if let Ok(mut s) = state().lock() {
-                        if let Some(pos) = s.pending_keyups.iter().position(|k| *k == keycode) {
-                            s.pending_keyups.remove(pos);
-                            return None; // 配套的 keyup 也要吞
+                    // 配套的 keyup 也要吞 —— 否则别的应用会收到"没有 keydown 的 keyup"。
+                    let swallow_it = {
+                        if let Ok(mut s) = state().lock() {
+                            match s.pending_keyups.iter().position(|k| *k == keycode) {
+                                Some(pos) => {
+                                    s.pending_keyups.remove(pos);
+                                    true
+                                }
+                                None => false,
+                            }
+                        } else {
+                            false
                         }
+                    };
+                    if swallow_it {
+                        return swallow(event);
                     }
                     None
                 }
@@ -354,4 +410,48 @@ pub fn set_expected(v: bool) {
 /// 是否期望监听在跑。
 pub fn expected() -> bool {
     EXPECTED.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHIFT: CGEventFlags = CGEventFlags::CGEventFlagShift;
+    const CTRL: CGEventFlags = CGEventFlags::CGEventFlagControl;
+    const CMD: CGEventFlags = CGEventFlags::CGEventFlagCommand;
+
+    /// ⌃⇧A / ⌃⇧D 要认得出来(⌘⇧ 也认 —— 容错:多带个 Fn/⌘ 也能按中)。
+    #[test]
+    fn 认得出两个快捷键() {
+        assert_eq!(match_hotkey_raw(KEY_A, SHIFT | CTRL), Some(Hotkey::Execute));
+        assert_eq!(match_hotkey_raw(KEY_D, SHIFT | CTRL), Some(Hotkey::Paste));
+        assert_eq!(match_hotkey_raw(KEY_A, SHIFT | CMD), Some(Hotkey::Execute));
+        assert_eq!(match_hotkey_raw(KEY_D, SHIFT | CMD), Some(Hotkey::Paste));
+    }
+
+    /// 少修饰键的**不算**快捷键。
+    ///
+    /// 这正是"多打出一个 D"的机制:修饰键没被识别时,前台收到的是 ⇧D,
+    /// 直接打出大写 D。我们的 tap 不能把它当快捷键 —— 但真正要解决的是
+    /// **别让它漏出去**(见 `swallow`)。
+    #[test]
+    fn 少修饰键的不算快捷键() {
+        assert_eq!(match_hotkey_raw(KEY_A, CTRL), None);
+        assert_eq!(match_hotkey_raw(KEY_A, SHIFT), None);
+        assert_eq!(match_hotkey_raw(KEY_D, SHIFT), None);
+        assert_eq!(match_hotkey_raw(KEY_D, CGEventFlags::empty()), None);
+    }
+
+    /// 不是 A / D 的键一律不算(哪怕修饰键齐全)。
+    #[test]
+    fn 别的键不算快捷键() {
+        for keycode in [1i64, 8, 36, 49] {
+            assert_eq!(
+                match_hotkey_raw(keycode, SHIFT | CTRL),
+                None,
+                "键码 {} 不该被当成快捷键",
+                keycode
+            );
+        }
+    }
 }
