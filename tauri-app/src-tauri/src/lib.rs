@@ -78,6 +78,9 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "safariRunning": safari::repair::safari_running_state(),
                     "runningProbe": safari::bridge::safari_running_probe(),
                     "poll": safari::repair::poll_diagnostics(),
+                    // 快通道(200ms 一轮,只盯出现过混淆字体的标签)的状态 ——
+                    // 查"切题后多久出明文"这件事专用。
+                    "fastPoll": safari::repair::fast_diagnostics(),
                 }),
             );
             // 原生能力状态:能不能发合成点击/按键(辅助功能权限)
@@ -511,6 +514,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 safari::repair::spawn_poller(app.handle().clone());
+                // **快通道**:200ms 一轮,只盯"出现过混淆字体的标签"。
+                // 主通道是"每 2 轮"≈1 秒才看一眼目标标签 —— 用户切题后立刻复制,
+                // 那 1 秒里映射还没下发 → 复制出来是密文(2026-10-23 真机故障,
+                // 表现是"两三次里错一次")。Electron 版有这条独立通道,这边同口径。
+                safari::repair::spawn_fast_poller(app.handle().clone());
                 // 恢复上次的开关状态(Electron 版也是落盘的,重启后仍保持开启)
                 if appcmd::feature_enabled(app.handle(), "safari-repair") {
                     safari::repair::set_enabled(true);

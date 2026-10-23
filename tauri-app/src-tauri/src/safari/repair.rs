@@ -74,6 +74,163 @@ struct RepairState {
     mapping_by_scope: std::collections::HashMap<String, String>,
 }
 
+/// ── 快通道（Electron 版 `fastTick` 的同口径实现）─────────────────────
+///
+/// ## 为什么必须有这条通道（2026-10-23 真机故障）
+///
+/// 主轮询里,目标站点的标签**每 2 轮**才处理一次(`SITE_TAB_EVERY_ROUNDS`),
+/// 而一轮本身要:判活(1 次 Apple Event ≈110ms) + 列全部标签(≈110ms)
+/// + 逐个标签处理 → **实际一圈 ~500ms 以上**,目标标签实际 **~1 秒**才被看一眼。
+///
+/// 用户切题后立刻复制,这一秒里映射还没下发 → **复制出来是密文**。
+/// 表现是"两三次里错一次" —— 失败率 ≈50%,正好是"每 2 轮"的周期规律,
+/// **不是随机故障**。
+///
+/// Electron 版有一条**独立**的快轮询(`coordinator.js` 的 `fastTick`):
+/// 200ms 一次,只盯"出现过混淆字体的标签",**不判活、不列标签**,
+/// 且不共用主轮次的 running 标志(它自己的注释写着:
+/// 「否则主轮次一圈 1.4 秒会把快轮询饿死」)。这边照搬那个形状。
+///
+/// ## 与主通道的关系
+///
+/// - 同一个标签**只由一条通道处理**:登记进快通道后,主通道跳过它
+///   （否则每次轮询都要多花两次 Apple Event,纯属浪费）。
+/// - 快通道线程要是死了,主通道会**接管**回来:靠心跳判断快通道还活着没。
+const FAST_POLL_INTERVAL_MS: u64 = 200;
+
+/// 快通道盯着的标签 + 心跳。
+struct CipherTabs {
+    /// (窗口, 标签) → 登记时的 URL
+    tabs: std::collections::HashMap<(u32, u32), String>,
+    /// 快通道最近一次心跳（诊断用）
+    heartbeats: u64,
+    /// 快通道最近一次心跳的时刻（判断它是不是还活着）
+    last_beat: std::time::Instant,
+}
+
+static CIPHER_TABS: OnceLock<Mutex<CipherTabs>> = OnceLock::new();
+
+fn cipher_tabs() -> &'static Mutex<CipherTabs> {
+    CIPHER_TABS.get_or_init(|| {
+        Mutex::new(CipherTabs {
+            tabs: std::collections::HashMap::new(),
+            heartbeats: 0,
+            last_beat: std::time::Instant::now(),
+        })
+    })
+}
+
+/// 正在被处理的标签 —— 防止主通道与快通道同时处理同一个标签。
+///
+/// 两个线程同时对同一个标签注入/下发映射,后到的会把先到的覆盖掉,
+/// 而先到的那次 Apple Event 还在等页面返回 —— 表现为偶发的"映射丢了"。
+static BUSY_TABS: OnceLock<Mutex<std::collections::HashSet<(u32, u32)>>> = OnceLock::new();
+
+fn busy_tabs() -> &'static Mutex<std::collections::HashSet<(u32, u32)>> {
+    BUSY_TABS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 登记一个"出现过混淆字体"的标签（进快通道）。
+fn register_cipher_tab(window_index: u32, tab_index: u32, url: &str) {
+    if let Ok(mut c) = cipher_tabs().lock() {
+        c.tabs.insert((window_index, tab_index), url.to_string());
+    }
+}
+
+/// 把标签从快通道摘掉（标签被关掉/换位了）。
+fn unregister_cipher_tab(window_index: u32, tab_index: u32) {
+    if let Ok(mut c) = cipher_tabs().lock() {
+        c.tabs.remove(&(window_index, tab_index));
+    }
+}
+
+/// 快通道盯着的标签快照。
+fn cipher_tab_snapshot() -> Vec<(u32, u32)> {
+    cipher_tabs()
+        .lock()
+        .map(|c| c.tabs.keys().copied().collect())
+        .unwrap_or_default()
+}
+
+/// 快通道是不是还活着（心跳在 2 秒以内）。
+///
+/// 主通道靠它决定"要不要接管快通道的标签"——
+/// 快通道线程要是 panic 死了,不能就此不再管那些标签。
+fn fast_alive() -> bool {
+    cipher_tabs()
+        .lock()
+        .map(|c| c.last_beat.elapsed() < std::time::Duration::from_secs(2))
+        .unwrap_or(false)
+}
+
+/// 快通道诊断信息。
+pub fn fast_diagnostics() -> serde_json::Value {
+    match cipher_tabs().lock() {
+        Ok(c) => serde_json::json!({
+            "cipherTabs": c.tabs.len(),
+            "heartbeats": c.heartbeats,
+            "alive": c.last_beat.elapsed() < std::time::Duration::from_secs(2),
+            "intervalMs": FAST_POLL_INTERVAL_MS,
+        }),
+        Err(_) => serde_json::json!({ "error": "快通道状态锁不可用" }),
+    }
+}
+
+/// 抢一个标签的处理权。抢不到说明别的线程正在处理它 → 这一轮跳过。
+fn try_lock_tab(key: (u32, u32)) -> bool {
+    match busy_tabs().lock() {
+        Ok(mut set) => set.insert(key),
+        Err(_) => true, // 锁坏了就别互相挡着(宁可重复也不要不处理)
+    }
+}
+
+fn unlock_tab(key: (u32, u32)) {
+    if let Ok(mut set) = busy_tabs().lock() {
+        set.remove(&key);
+    }
+}
+
+/// 启动快通道线程（200ms 一轮）。
+pub fn spawn_fast_poller(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            if is_enabled() {
+                if let Ok(mut c) = cipher_tabs().lock() {
+                    c.heartbeats += 1;
+                    c.last_beat = std::time::Instant::now();
+                }
+                // Safari 在不在跑:读**主通道**的状态(它每轮都在问)——
+                // 不额外发 Apple Event(一次就是 110ms,而这条通道 200ms 才走一轮)。
+                if safari_running_state().unwrap_or(false) {
+                    fast_tick(&app);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(FAST_POLL_INTERVAL_MS));
+        }
+    });
+}
+
+/// 快通道这一轮:把盯着的那几个标签各跑一遍。
+fn fast_tick(app: &tauri::AppHandle) {
+    for (w, t) in cipher_tab_snapshot() {
+        match check_tab(app, w, t) {
+            Ok(_) => {}
+            Err(e) => {
+                // **只在标签真的没了的时候**才摘掉它:
+                // - `-1728` = "不能获得 tab N of window M" → 标签被关掉/换位了;
+                // - 超时 = 页面忙,守卫其实已经装上了 → 不是"标签没了";
+                // - 别的错(注入失败等)也留着 —— 下一轮就好。
+                //
+                // 摘错的代价:标签被关了却还盯着 → 快通道每 200ms 白打一次
+                // Apple Event(≈100ms/次),一直打下去。
+                if e.contains("-1728") {
+                    unregister_cipher_tab(w, t);
+                }
+            }
+        }
+    }
+}
+
 /// 轮询诊断信息(自检用)。
 pub fn poll_diagnostics() -> serde_json::Value {
     let s = state().lock().map(|s| (s.poll_count, s.last_poll_enabled, s.last_probe.clone()));
@@ -235,6 +392,27 @@ fn reference_db(app: &tauri::AppHandle) -> Result<std::sync::Arc<GlyphDb>, Strin
         }
     }
     Err(format!("读参考库失败: {}", last_err))
+}
+
+/// 取**快速匹配器**（参考库 + 粗栅格解包 + 精确哈希索引）。
+///
+/// **必须缓存**：匹配器构造一次要
+///   - 把粗栅格解包成 nibble 数组（21517 × 64 ≈ 1.4MB）
+///   - 建精确哈希索引（21517 条）
+/// 实测 release 下 **26ms**；而 `FastGlyphMatcher::new` 要**拿走** GlyphDb 的所有权,
+/// 所以每次调用都得克隆整份库（9.7MB）—— 两者加起来 **36ms/次**。
+///
+/// 快通道每 200ms 跑一轮,每次都重建就是纯浪费(还会让整台机器发烫)。
+/// Electron 版是 `engine.matchers` 这个 Map,本来就只建一次 —— 这边同口径。
+fn fast_matcher(app: &tauri::AppHandle) -> Result<std::sync::Arc<FastGlyphMatcher>, String> {
+    static M: OnceLock<std::sync::Arc<FastGlyphMatcher>> = OnceLock::new();
+    if let Some(m) = M.get() {
+        return Ok(m.clone());
+    }
+    let db = reference_db(app)?;
+    let m = std::sync::Arc::new(FastGlyphMatcher::new((*db).clone()));
+    let _ = M.set(m.clone());
+    Ok(m)
 }
 
 /// 取字体字节。
@@ -574,13 +752,32 @@ fn build_mapping(entries: &HashMap<char, CharInfo>) -> HashMap<char, char> {
 }
 
 /// 对某个标签跑一轮：注入 → 取作用域 → 算映射 → 写回。
+///
+/// **同一个标签只允许一条通道在处理**：主通道与快通道都调它,
+/// 用「处理权」锁互斥 —— 否则两次注入/下发会互相覆盖,
+/// 而先发的那次 Apple Event 还在等页面返回(表现为偶发的"映射丢了")。
 pub fn check_tab(
     app: &tauri::AppHandle,
     window_index: u32,
     tab_index: u32,
 ) -> Result<(usize, bool), String> {
-    let db = reference_db(app)?;
-    let matcher = FastGlyphMatcher::new((*db).clone());
+    let key = (window_index, tab_index);
+    if !try_lock_tab(key) {
+        // 别的线程正在处理这个标签 → 这一轮跳过(它会处理到)。
+        return Ok((0, false));
+    }
+    let result = check_tab_inner(app, window_index, tab_index);
+    unlock_tab(key);
+    result
+}
+
+fn check_tab_inner(
+    app: &tauri::AppHandle,
+    window_index: u32,
+    tab_index: u32,
+) -> Result<(usize, bool), String> {
+    // 匹配器**只建一次**(快通道 200ms 一轮,每次重建要 36ms —— 纯浪费)。
+    let matcher = fast_matcher(app)?;
 
     // 1) 先采集状态
     //
@@ -676,6 +873,16 @@ pub fn check_tab(
                 continue;
             }
             set_mapping_result(scope_key, &format!("映射建成了: {} 个字", mapping.len()));
+            // **建出了映射 = 这个标签用了混淆字体** → 登记进快通道。
+            //
+            // 快通道 200ms 一轮地盯着它,用户切题后映射能在 ~300ms 内下发
+            // (主通道是"每 2 轮"≈1 秒,用户往往等不到)。
+            //
+            // 只登记**真的建出映射**的标签:图标字体(icomoon 之类)建不出映射,
+            // 它们不会换题,不需要快反应 —— 让它们进来只是白花 Apple Event。
+            if let Some(url) = state.get("url").and_then(|v| v.as_str()) {
+                register_cipher_tab(window_index, tab_index, url);
+            }
             let json: serde_json::Map<String, serde_json::Value> = mapping
                 .iter()
                 .map(|(k, v)| {
@@ -703,6 +910,51 @@ fn groups_of(item: &serde_json::Value) -> Vec<&serde_json::Value> {
         .and_then(|g| g.as_array())
         .map(|a| a.iter().collect())
         .unwrap_or_default()
+}
+
+/// 快通道当前盯着的标签集合。
+fn cipher_tab_set() -> std::collections::HashSet<(u32, u32)> {
+    cipher_tabs()
+        .lock()
+        .map(|c| c.tabs.keys().copied().collect())
+        .unwrap_or_default()
+}
+
+/// 这一轮主通道要处理哪些标签（**纯函数**，便于测试）。
+///
+/// 口径与 Electron 版 coordinator.js 的 `planJobs` 同构：
+/// - 目标站点的标签：**每 2 轮**处理一次；
+/// - 前台标签：每轮都处理；
+/// - **快通道在盯的标签：主通道不重复处理**（快通道 200ms 一轮，
+///   主通道"每 2 轮"≈1 秒 —— 两个都做就是每次轮询多花两次 Apple Event）。
+///   但快通道心跳过期时（线程死了），主通道**自动接管**回来，
+///   不能就此不再管那些标签。
+fn select_targets(
+    round: u64,
+    tabs: &[(u32, u32, String)],
+    front: Option<(u32, u32)>,
+    cipher: &std::collections::HashSet<(u32, u32)>,
+    fast_alive: bool,
+) -> Vec<(u32, u32)> {
+    let mut targets: Vec<(u32, u32)> = Vec::new();
+    let skip = |k: (u32, u32)| fast_alive && cipher.contains(&k);
+    if round % SITE_TAB_EVERY_ROUNDS == 0 {
+        for (w, t, url) in tabs {
+            if SITE_FILTER.iter().any(|s| url.contains(s)) {
+                if skip((*w, *t)) {
+                    continue;
+                }
+                targets.push((*w, *t));
+            }
+        }
+    }
+    // 前台标签:每轮都处理 —— 不这样的话,"在别的网站上用了混淆字体"永远不会被接管
+    if let Some((w, t)) = front {
+        if !targets.contains(&(w, t)) && !skip((w, t)) {
+            targets.push((w, t));
+        }
+    }
+    targets
 }
 
 /// 扫所有匹配站点的标签，各跑一轮。
@@ -770,22 +1022,14 @@ pub fn check_now(app: &tauri::AppHandle, round: u64) -> Result<serde_json::Value
     // 要处理的标签:**目标站点的标签 + 前台标签**。
     // 前台标签每轮都处理(Electron 版同口径)——
     // 不这样的话,"在别的网站上用了混淆字体"永远不会被接管。
-    let mut targets: Vec<(u32, u32)> = Vec::new();
-    // 目标站点的标签:每 2 轮处理一次(Electron 版同口径)
-    if round % SITE_TAB_EVERY_ROUNDS == 0 {
-        for (w, t, url) in &tabs {
-            if SITE_FILTER.iter().any(|s| url.contains(s)) {
-                targets.push((*w, *t));
-            }
-        }
-    }
-    // 前台标签:每轮都处理 —— 不这样的话,"在别的网站上用了混淆字体"永远不会被接管
-    if let Some((w, t)) = front {
-        if !targets.contains(&(w, t)) {
-            targets.push((w, t));
-        }
-    }
-    for (w, t) in targets {
+    let mut targets: Vec<(u32, u32)> = select_targets(
+        round,
+        &tabs,
+        front,
+        &cipher_tab_set(),
+        fast_alive(),
+    );
+    for (w, t) in targets.drain(..) {
         checked += 1;
         match check_tab(app, w, t) {
             Ok((n, guard_ok)) => {
@@ -952,5 +1196,93 @@ mod tests {
             wrong.len(),
             &wrong[..wrong.len().min(5)]
         );
+    }
+
+    /// **快通道的登记/摘除**。
+    ///
+    /// 快通道盯着的标签 = "出现过混淆字体"的标签。
+    /// 登记错了 → 要么快通道白转(每 200ms 一次 Apple Event),
+    /// 要么该快反应的标签没被盯上(回到"切题后 1 秒才有映射"的老毛病)。
+    #[test]
+    fn 快通道的登记与摘除() {
+        let key = (7u32, 19u32);
+        unregister_cipher_tab(key.0, key.1);
+        assert!(
+            !cipher_tab_set().contains(&key),
+            "一开始不该在快通道里"
+        );
+
+        register_cipher_tab(key.0, key.1, "https://example.com/quiz");
+        assert!(
+            cipher_tab_set().contains(&key),
+            "登记后必须在快通道里"
+        );
+
+        unregister_cipher_tab(key.0, key.1);
+        assert!(
+            !cipher_tab_set().contains(&key),
+            "摘掉后必须不在快通道里"
+        );
+    }
+
+    /// **同一个标签只允许一条通道在处理**。
+    ///
+    /// 主通道与快通道都会调 `check_tab`;两个线程同时对同一个标签
+    /// 注入/下发映射 → 后到的覆盖先到的,而先发的那次 Apple Event
+    /// 还在等页面返回 → 偶发的"映射丢了"。
+    #[test]
+    fn 同一个标签只允许一条通道处理() {
+        let key = (3u32, 11u32);
+        assert!(try_lock_tab(key), "第一次应该抢到处理权");
+        assert!(!try_lock_tab(key), "第二次必须抢不到");
+        unlock_tab(key);
+        assert!(try_lock_tab(key), "释放之后应该能再抢到");
+        unlock_tab(key);
+    }
+
+    /// **主通道要让位给快通道,但快通道死了要接管回来**。
+    ///
+    /// 这是这次故障的核心:目标标签"每 2 轮"才被主通道看一眼(≈1 秒),
+    /// 用户切题后立刻复制 → 映射还没下发 → 复制出来是密文
+    /// (2026-10-23 真机故障,表现是"两三次里错一次")。
+    /// 快通道活着 → 主通道不重复处理(省两次 Apple Event);
+    /// 快通道心跳过期 → 主通道**必须**接管,否则那些标签就再没人管了。
+    #[test]
+    fn 主通道让位给快通道_快通道死了要接管() {
+        let tabs = vec![
+            (1u32, 5u32, "https://mooc1.chaoxing.com/mycourse/studentstudy".to_string()),
+            (1u32, 6u32, "https://www.bilibili.com/".to_string()),
+        ];
+        let cipher: std::collections::HashSet<(u32, u32)> = [(1u32, 5u32)].into_iter().collect();
+
+        // 快通道活着 → 主通道跳过那个标签(但**只在这轮**处理目标站点标签)
+        let targets = select_targets(SITE_TAB_EVERY_ROUNDS, &tabs, None, &cipher, true);
+        assert!(
+            !targets.contains(&(1, 5)),
+            "快通道活着时,主通道不该重复处理它"
+        );
+
+        // 快通道死了(心跳过期) → 主通道接管回来
+        let targets = select_targets(SITE_TAB_EVERY_ROUNDS, &tabs, None, &cipher, false);
+        assert!(
+            targets.contains(&(1, 5)),
+            "快通道没了,主通道必须接管,否则那个标签就再没人管"
+        );
+    }
+
+    /// **目标站点标签每 2 轮才进主通道**(Electron 版同口径)。
+    ///
+    /// 这条本身不是 bug,但它正是"切题后要等 1 秒"的来源 ——
+    /// 有了快通道之后,主通道这条慢通道只负责"发现新标签"。
+    #[test]
+    fn 目标站点标签每两轮才进主通道() {
+        let tabs = vec![(1u32, 5u32, "https://i.chaoxing.com/base".to_string())];
+        let empty: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+
+        let odd = select_targets(1, &tabs, None, &empty, true);
+        assert!(odd.is_empty(), "不是 2 的倍数那轮不该处理目标站点标签");
+
+        let even = select_targets(2, &tabs, None, &empty, true);
+        assert_eq!(even, vec![(1, 5)], "第 2 轮必须处理目标站点标签");
     }
 }
