@@ -66,6 +66,12 @@ struct RepairState {
     /// 这些分支原本全是 `continue` —— 静默跳过,界面只看得到"已开启"。
     /// 真出问题时(字体取不到、参考库不对)根本无从查起,必须把原因透出来。
     last_mapping_note: String,
+    /// **逐个作用域**的映射结果(scopeKey → 结果描述)。
+    ///
+    /// 只留"最后一次"是不行的:一个页面上常有五六个作用域
+    /// (混淆字体、图标字体、各种普通字体栈),处理顺序一变,
+    /// 真正出问题的那条就被后面的一条盖住了 —— 排查时等于什么都看不到。
+    mapping_by_scope: std::collections::HashMap<String, String>,
 }
 
 /// 轮询诊断信息(自检用)。
@@ -101,6 +107,41 @@ pub fn set_mapping_note(note: &str) {
     if let Ok(mut s) = state().lock() {
         s.last_mapping_note = note.to_string();
     }
+}
+
+/// 记下**某个作用域**的映射结果（诊断用）。
+///
+/// 一个页面上常有好几个作用域(混淆字体、图标字体、几个普通字体栈),
+/// 只留"最后一次"会把真正出问题的那条盖住 —— 必须逐条记。
+pub fn set_mapping_result(scope_key: &str, note: &str) {
+    if let Ok(mut s) = state().lock() {
+        s.last_mapping_note = note.to_string();
+        s.mapping_by_scope.insert(scope_key.to_string(), note.to_string());
+        // 只留最近 12 条,免得诊断文件无限长
+        if s.mapping_by_scope.len() > 12 {
+            let oldest = s
+                .mapping_by_scope
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+            s.mapping_by_scope.remove(&oldest);
+        }
+    }
+}
+
+/// 逐个作用域的映射结果(诊断用)。
+pub fn mapping_results() -> serde_json::Value {
+    state()
+        .lock()
+        .map(|s| {
+            let mut map = serde_json::Map::new();
+            for (k, v) in s.mapping_by_scope.iter() {
+                map.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            serde_json::Value::Object(map)
+        })
+        .unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// 最近一次「映射没建起来」的原因（空串 = 上一次是好的）。
@@ -612,26 +653,29 @@ pub fn check_tab(
                 continue;
             };
             let Some((kind, value)) = group_font_source(group) else {
+                // 页面上的普通字体(没有可取的字体文件)—— 不是故障,但也要记一条,
+                // 否则"这个作用域为什么没有映射"就没人答得上来了。
+                set_mapping_result(scope_key, "该作用域没有可取的字体来源(普通字体,不需要映射)");
                 continue;
             };
             let Ok(font_bytes) = fetch_font(&kind, &value) else {
-                set_mapping_note(&format!("取字体失败({}): {}", kind, value));
+                set_mapping_result(scope_key, &format!("取字体失败({}): {}", kind, value));
                 continue;
             };
             // 同一个字体只解析一次(按内容哈希缓存)
             let Ok(entries) = analyze_font(matcher.db(), &matcher, &font_bytes) else {
-                set_mapping_note(&format!("分析字体失败: {}", value));
+                set_mapping_result(scope_key, &format!("分析字体失败: {}", value));
                 continue;
             };
             let mapping = build_mapping(&entries);
             if mapping.is_empty() {
-                set_mapping_note(&format!(
-                    "映射为空(字体 {} 个码位,都没认准)",
-                    entries.len()
-                ));
+                set_mapping_result(
+                    scope_key,
+                    &format!("映射为空(字体 {} 个码位,都没认准)", entries.len()),
+                );
                 continue;
             }
-            set_mapping_note(&format!("映射建成了: {} 个字", mapping.len()));
+            set_mapping_result(scope_key, &format!("映射建成了: {} 个字", mapping.len()));
             let json: serde_json::Map<String, serde_json::Value> = mapping
                 .iter()
                 .map(|(k, v)| {
