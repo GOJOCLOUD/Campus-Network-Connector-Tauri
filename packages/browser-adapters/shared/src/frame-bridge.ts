@@ -44,6 +44,12 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
      * 主动驱动各 frame 采集（selectionchange 在程序化选区时可能不触发）。
      */
     take() {
+      // **先重扫**:frame 名单必须是用之前的当前状态。
+      // 站点会在**嵌套 frame 内部**换 iframe(SPA 换题),
+      // 而顶层的 MutationObserver **看不见**嵌套里的变化 →
+      // 名单一旦过期,映射就发不到真正有题目的那层 →
+      // 那一层复制出来还是密文(2026-10-23 真机故障)。
+      scan();
       const collected = pending.splice(0, pending.length);
       const collectedUnrepaired = unrepaired.splice(0, unrepaired.length);
       const all = framesInjected.slice();
@@ -76,6 +82,10 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
     },
     /** 把映射分发到所有 frame（顶层自己也设一份） */
     setMapping(scopeKey: string, mapping: Record<string, string>) {
+      // **先重扫**:分发必须打到**当前**的 frame 上。
+      // 名单过期时,映射会发到上一套 iframe(已经变 about:blank 的那些),
+      // 真正在显示题目的那层反而拿不到 → 复制出来还是密文。
+      scan();
       let count = 0;
       // 注意：API 挂在 window 上（不是 state 对象上）
       const topApi = globalScope.__copyRepairSetMapping;
@@ -111,7 +121,7 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
           const g = (frame as any).__copyRepairGuard;
           info.push({
             hasGuard: !!g,
-            pending: g && g.pending ? g.pending.chars.length : null,
+            pending: g && g.pending && g.pending.groups ? g.pending.groups.length : null,
             hasCollect: typeof (frame as any).__copyRepairCollect === 'function',
           });
         } catch (e) {
@@ -174,19 +184,28 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
    * 真实目标页面的选区在第 4 层嵌套 frame 里，只扫第一层会完全漏掉。
    */
   function scan(): void {
+    // 本轮**当前树**里的 frame —— 用来把过期条目从名单里清掉
+    const current: Window[] = [];
     const visit = (win: Window | null, depth: number): void => {
       if (!win || depth > 8) return;
       injectInto(win);
       try {
         const list = win.document.querySelectorAll('iframe');
         for (let i = 0; i < list.length; i += 1) {
-          visit(list[i].contentWindow, depth + 1);
+          const child = list[i].contentWindow;
+          if (child) current.push(child);
+          visit(child, depth + 1);
         }
       } catch (_) {
         /* 跨源 frame 忽略 */
       }
     };
     visit(window, 0);
+    // 站点重建 iframe 之后,旧 frame 已经不在页面里了 ——
+    // 留在名单里只会让映射白发给一堆 about:blank,而且越攒越多。
+    for (let i = framesInjected.length - 1; i >= 0; i -= 1) {
+      if (current.indexOf(framesInjected[i]) < 0) framesInjected.splice(i, 1);
+    }
   }
 
   globalScope.__copyRepairBridge = bridge;
