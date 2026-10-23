@@ -26,6 +26,7 @@
        * 主动驱动各 frame 采集（selectionchange 在程序化选区时可能不触发）。
        */
       take() {
+        scan();
         const collected = pending.splice(0, pending.length);
         const collectedUnrepaired = unrepaired.splice(0, unrepaired.length);
         const all = framesInjected.slice();
@@ -53,6 +54,7 @@
       },
       /** 把映射分发到所有 frame（顶层自己也设一份） */
       setMapping(scopeKey, mapping) {
+        scan();
         let count = 0;
         const topApi = globalScope.__copyRepairSetMapping;
         if (typeof topApi === "function") {
@@ -86,7 +88,7 @@
             const g = frame.__copyRepairGuard;
             info.push({
               hasGuard: !!g,
-              pending: g && g.pending ? g.pending.chars.length : null,
+              pending: g && g.pending && g.pending.groups ? g.pending.groups.length : null,
               hasCollect: typeof frame.__copyRepairCollect === "function"
             });
           } catch (e) {
@@ -127,18 +129,24 @@
       return healed;
     }
     function scan() {
+      const current = [];
       const visit = (win, depth) => {
         if (!win || depth > 8) return;
         injectInto(win);
         try {
           const list = win.document.querySelectorAll("iframe");
           for (let i = 0; i < list.length; i += 1) {
-            visit(list[i].contentWindow, depth + 1);
+            const child = list[i].contentWindow;
+            if (child) current.push(child);
+            visit(child, depth + 1);
           }
         } catch (_) {
         }
       };
       visit(window, 0);
+      for (let i = framesInjected.length - 1; i >= 0; i -= 1) {
+        if (current.indexOf(framesInjected[i]) < 0) framesInjected.splice(i, 1);
+      }
     }
     globalScope.__copyRepairBridge = bridge;
     scan();
