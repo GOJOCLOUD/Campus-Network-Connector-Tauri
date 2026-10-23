@@ -140,7 +140,7 @@ pub fn last_error() -> String {
 /// 用户看到的症状就是「多打出一个 D」(修饰键没被识别时前台收到的是 ⇧D,
 /// 直接打出大写 D)—— 这条原始投诉一直**没有**被真正修掉。
 fn swallow(event: &CGEvent) -> Option<CGEvent> {
-    let mut dead = event.clone();
+    let dead = event.clone();
     dead.set_type(CGEventType::Null);
     Some(dead)
 }
