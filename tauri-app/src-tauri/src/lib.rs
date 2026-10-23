@@ -457,7 +457,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        // 全局快捷键:⌃⇧A 默认执行 / ⌃⇧D 剪贴板直输(macOS)。
+        // 全局快捷键:⌃S 默认执行 / ⌃D 剪贴板直输(macOS)。
         // 快捷键走的是**后端**这条路 —— 界面没打开时也要能用。
         .plugin(tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|app, shortcut, event| {
@@ -539,7 +539,7 @@ pub fn run() {
             // 必须在任何命令/线程起来**之前**记,记错了会自锁。
             nativecmd::init_main_thread(app.handle());
             // 自检模式:快捷键命中了也**不执行**真动作
-            // (自检要真的按一次 ⌃⇧A,而那个动作是"回放录制文件",
+            // (自检要真的按一次 ⌃S,而那个动作是"回放录制文件",
             //  会在用户屏幕上真的点来点去 —— 自检不能有这种副作用)。
             #[cfg(target_os = "macos")]
             if std::env::args().any(|a| a == "--diag-hotkey-trigger") {
@@ -632,9 +632,9 @@ pub fn run() {
             //   系统的全局热键要求修饰键**一模一样**:手上多带一个 Fn/⌥ 就对不上,
             //   按键没被吃掉 → 那个 D 就漏进了当前应用("多打出一个 D"),
             //   同时动作也不执行(看起来就是"快捷键失灵")。
-            //   自己监听:匹配只看"有没有 ⌃⇧/⌘⇧",并把按键吃掉,被系统禁用还能重建。
+            //   自己监听:匹配只看"有没有 Control",并把按键吃掉,被系统禁用还能重建。
             // - **Windows**:用系统的全局热键(那边没有输入源切换这套打法,
-            //   ⌃⇧A 走同一条路)。
+            //   ⌃S 走同一条路)。
             #[cfg(target_os = "macos")]
             {
                 match nativecmd::hotkey::start(app.handle().clone()) {
@@ -644,7 +644,7 @@ pub fn run() {
                 // 启动参数带 `--diag-hotkey-trigger` 时,跑一次
                 // 「按一次快捷键会不会把 App 崩掉」的自检。
                 //
-                // 平时**不跑** —— 它会往自己身上发一次 ⌃⇧A。
+                // 平时**不跑** —— 它会往自己身上发一次 ⌃S。
                 // 要查这件事时再手动带这个参数启动。
                 if std::env::args().any(|a| a == "--diag-hotkey-trigger") {
                     std::thread::spawn(move || {
@@ -738,15 +738,15 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
 /// 快捷键的组合键字符串。
 ///
 /// ⚠️ **必须写 `Control`,不能写 `CmdOrControl`**:
-/// Electron 版注册的是 `globalShortcut.register('Ctrl+Shift+A' / 'Ctrl+Shift+D')`
-/// —— 也就是 **⌃⇧A / ⌃⇧D**。
+/// Electron 版注册的是 `globalShortcut.register('Ctrl+S' / 'Ctrl+D')`
+/// —— 也就是 **⌃S / ⌃D**。
 /// 而 `CmdOrControl` 在 macOS 上会被解析成 **⌘(Command)**(global-hotkey 的
 /// `CMDORCONTROL` 在 macOS 分支映射到 `Modifiers::SUPER`),
-/// 结果就是:系统里监听的是 ⌘⇧D,用户按 ⌃⇧D **什么都不会发生**。
+/// 结果就是:系统里监听的是 ⌘D,用户按 ⌃D **什么都不会发生**。
 ///
 /// `Control` 在所有平台都是 Control,和 Electron 版完全同口径。
-const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+Shift+A";
-const SHORTCUT_PASTE: &str = "Control+Shift+D";
+const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+S";
+const SHORTCUT_PASTE: &str = "Control+D";
 
 /// 把组合键字符串解析成插件的 Shortcut。
 fn parse_shortcut(key: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
@@ -784,10 +784,10 @@ mod shortcut_tests {
                 key
             );
             assert!(
-                s.mods.contains(Modifiers::SHIFT),
-                "{} 必须带 Shift,实际 mods={:?}",
-                key,
-                s.mods
+                !s.mods.contains(Modifiers::SHIFT),
+                "{} 不要再带 Shift —— 原来要「⌃⇧ + 字母」三根手指一起按,太别扭 \
+                 (2026-10-23 用户要求:「只要按住 Ctrl 再点一下字母」)",
+                key
             );
         }
     }

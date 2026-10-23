@@ -1,8 +1,8 @@
 //! 全局快捷键触发的两个动作 —— 与 Electron 版 `main.js` 里的
 //! `triggerDefaultExecute` / `triggerPinyinFromClipboard` **同口径**。
 //!
-//! - ⌃⇧A:触发「默认执行」—— 回放选中的录制文件(没选中就回放名字最大的那个)
-//! - ⌃⇧D:读剪贴板(或输入框里固定的那段文本)并逐字键入(只有 macOS 有输入源切换这套打法)
+//! - ⌃S:触发「默认执行」—— 回放选中的录制文件(没选中就回放名字最大的那个)
+//! - ⌃D:读剪贴板(或输入框里固定的那段文本)并逐字键入(只有 macOS 有输入源切换这套打法)
 //!
 //! 走的是**后端**这条路,不是界面上那条:快捷键在界面没打开时也要能用。
 
@@ -146,7 +146,7 @@ pub fn shortcut_hits() -> Vec<Value> {
     HITS.lock().map(|v| v.clone()).unwrap_or_default()
 }
 
-/// ⌃⇧A:触发「默认执行」。
+/// ⌃S:触发「默认执行」。
 ///
 /// 口径(Electron 版 `triggerDefaultExecute`):
 /// 1. 用设置里选中的录制文件;没选中就取**名字最大的**那个
@@ -172,7 +172,7 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
         match names.pop() {
             Some(n) => file_name = n,
             None => {
-                record_shortcut_hit("⌃⇧A", "一个录制文件都没有");
+                record_shortcut_hit("⌃S", "一个录制文件都没有");
                 return Ok(());
             }
         }
@@ -186,21 +186,21 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
         .cloned()
         .unwrap_or_default();
     if clicks.is_empty() {
-        record_shortcut_hit("⌃⇧A", &format!("{} 里没有可执行的点击", file_name));
+        record_shortcut_hit("⌃S", &format!("{} 里没有可执行的点击", file_name));
         return Ok(());
     }
     let inputs = crate::commands::play::resolve_inputs(&clicks, None);
     // 重入保护在这里生效:上一次回放还没结束时,这次**不重复执行**
     // (2026-10-23 T0 事故:回放互相触发 ⇒ 无限循环 ⇒ 机器卡死)。
     if crate::commands::play::spawn_playback(Some(app.clone()), file_name.clone(), clicks, 0.5, inputs) {
-        record_shortcut_hit("⌃⇧A", &format!("开始回放 {}", file_name));
+        record_shortcut_hit("⌃S", &format!("开始回放 {}", file_name));
     } else {
-        record_shortcut_hit("⌃⇧A", "上一次回放还没结束,这次没有重复执行");
+        record_shortcut_hit("⌃S", "上一次回放还没结束,这次没有重复执行");
     }
     Ok(())
 }
 
-/// ⌃⇧D:读剪贴板(或输入框里固定的那段文本)并逐字键入。
+/// ⌃D:读剪贴板(或输入框里固定的那段文本)并逐字键入。
 ///
 /// 只有 macOS 有这套打法(要切输入源);Windows 那边是直接送 Unicode 字符,
 /// 没有等价物 —— 和 Electron 版一样,那边不注册这个快捷键。
@@ -223,7 +223,7 @@ pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
     };
     let text = text.trim().to_string();
     if text.is_empty() {
-        record_shortcut_hit("⌃⇧D", "剪贴板是空的");
+        record_shortcut_hit("⌃D", "剪贴板是空的");
         return Ok(());
     }
 
@@ -243,11 +243,11 @@ pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
 
     match crate::commands::native::send_text(text.clone()) {
         Ok(_) => {
-            record_shortcut_hit("⌃⇧D", &format!("已键入 {} 个字符", text.chars().count()));
+            record_shortcut_hit("⌃D", &format!("已键入 {} 个字符", text.chars().count()));
             Ok(())
         }
         Err(e) => {
-            record_shortcut_hit("⌃⇧D", &format!("键入失败: {}", e));
+            record_shortcut_hit("⌃D", &format!("键入失败: {}", e));
             Err(e)
         }
     }

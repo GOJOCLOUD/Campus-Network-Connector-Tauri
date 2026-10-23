@@ -228,11 +228,11 @@ function App() {
     // 这里原本还会往屏幕最底下贴一条黑色调试条(显示按键信息)——
     // 那条带子已经删掉了(挡住屏幕底下的内容),但快捷键保留。
     const onKeyDown = (e) => {
-      if (e.ctrlKey && e.shiftKey && e.code === 'KeyA') {
+      if (e.ctrlKey && e.code === 'KeyS') {
         e.preventDefault()
         defaultExecuteRef.current()
       }
-      if (e.ctrlKey && e.shiftKey && e.code === 'KeyD' && !isWindows) {
+      if (e.ctrlKey && e.code === 'KeyD' && !isWindows) {
         e.preventDefault()
         setMessage('读取剪贴板中...')
         setTimeout(() => setMessage(''), 2000)

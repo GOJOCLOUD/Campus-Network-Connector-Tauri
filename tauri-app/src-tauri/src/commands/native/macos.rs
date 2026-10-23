@@ -255,7 +255,7 @@ fn current_input_source_info_on_main() -> Result<crate::commands::native::InputS
 /// 切换输入源(传输入源 id,如 "com.apple.keylayout.ABC")。
 ///
 /// ⚠️ 同样只能在主线程调(Carbon TIS 的要求)—— 这里统一编排。
-/// ⌃⇧D 的动作跑在**动作线程**上(不是主线程),没有这层编排就会崩。
+/// ⌃D 的动作跑在**动作线程**上(不是主线程),没有这层编排就会崩。
 pub fn select_input_source(source_id: String) -> Result<bool, String> {
     crate::commands::native::run_on_main_thread(
         move || select_input_source_on_main(source_id),
@@ -315,7 +315,7 @@ mod tests {
         );
     }
 
-    /// 切输入源同理 —— ⌃⇧D 的动作跑在**动作线程**上,不是主线程。
+    /// 切输入源同理 —— ⌃D 的动作跑在**动作线程**上,不是主线程。
     #[test]
     fn 非主线程切输入源不崩() {
         let r = std::thread::spawn(|| {

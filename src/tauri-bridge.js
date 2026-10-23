@@ -230,10 +230,10 @@ function installTauriBridge() {
   // ── 剪贴板 API:接到原生的 NSPasteboard 上 ──────────────────────
   //
   // 界面里两处用的是**浏览器**的剪贴板 API(Electron 版逐字搬过来的):
-  //   · ⌃⇧D 剪贴板直入 → navigator.clipboard.readText()
+  //   · ⌃D 剪贴板直入 → navigator.clipboard.readText()
   //   · 「复制 UUID」    → navigator.clipboard.writeText()
   // Electron 里这两个是能用的;**WKWebView 里不可靠** —— 读要么直接失败,
-  // 要么每次弹「允许粘贴」,于是窗口内那条 ⌃⇧D 就"按了没反应"。
+  // 要么每次弹「允许粘贴」,于是窗口内那条 ⌃D 就"按了没反应"。
   //
   // 这里把浏览器 API 换成原生实现(NSPasteboard / NSPasteboardTypeString):
   // **界面代码一个字都不用改**(与 Electron 逐字相同,见 ADR-0013),
