@@ -49,6 +49,30 @@ static PLAYING: AtomicBool = AtomicBool::new(false);
 /// 因为"已经在放了"而被拒绝的回放次数(诊断用)。
 static REJECTED: AtomicU64 = AtomicU64::new(0);
 
+/// 回放期间让窗口**穿透**(不接收鼠标事件),返回有没有成功。
+///
+/// ## 为什么必须有它
+///
+/// App 的窗口是 always-on-top 的小面板,**常常正好盖在目标网站的输入框上面**。
+/// 回放要点击的位置如果落在自己窗口上:
+/// - 不穿透 ⇒ 那个点击变成**点自己** ⇒ 点中自己的「默认执行」⇒ 又一次回放
+///   ⇒ **无限自激循环**(2026-10-23 T0)⇒ 疯狂键入 ⇒ 机器卡死;
+/// - 而"跳过落在自己窗口上的点击"也不行 ⇒ 那些点击往往**正是要点的输入框**,
+///   跳过了回放就点不进去(功能缺失)。
+///
+/// 穿透成功 ⇒ 点击**正常落到下面的应用** ⇒ 既不自激,回放也完整。
+/// 穿透失败(平台不支持 / 没权限)⇒ 退回"跳过落在自己窗口上的点击"。
+fn set_window_passthrough(app: &Option<AppHandle>, ignore: bool) -> bool {
+    let Some(app) = app else {
+        return false;
+    };
+    use tauri::Manager;
+    match app.get_webview_window("main") {
+        Some(w) => w.set_ignore_cursor_events(ignore).is_ok(),
+        None => false,
+    }
+}
+
 /// 回放进行中吗(诊断/界面用)。
 pub fn is_playing() -> bool {
     PLAYING.load(Ordering::SeqCst)
@@ -59,12 +83,17 @@ pub fn rejected_count() -> u64 {
     REJECTED.load(Ordering::SeqCst)
 }
 
-/// 回放线程结束时自动把 `PLAYING` 复位(哪怕线程 panic 了)。
-struct PlayingGuard;
+/// 回放线程结束时自动把 `PLAYING` 复位、窗口恢复可点(哪怕线程 panic 了)。
+struct PlayingGuard {
+    /// 回放用的 AppHandle(恢复穿透时要用)
+    app: Option<AppHandle>,
+}
 
 impl Drop for PlayingGuard {
     fn drop(&mut self) {
         PLAYING.store(false, Ordering::SeqCst);
+        // 窗口恢复可点 —— 不恢复的话,用户会以为界面坏了。
+        set_window_passthrough(&self.app, false);
     }
 }
 
@@ -172,8 +201,9 @@ pub fn run_clicks(
     clicks: &[Value],
     interval: f64,
     inputs: Option<&[Option<String>]>,
+    skip_own_window: bool,
 ) -> (usize, usize, String) {
-    run_clicks_with(clicks, interval, inputs, native::mouse_click)
+    run_clicks_with(clicks, interval, inputs, native::mouse_click, skip_own_window)
 }
 
 /// 同 `run_clicks`,但**点击怎么发由调用方决定**。
@@ -188,6 +218,7 @@ fn run_clicks_with<F>(
     interval: f64,
     inputs: Option<&[Option<String>]>,
     mut send: F,
+    skip_own_window: bool,
 ) -> (usize, usize, String)
 where
     F: FnMut(f64, f64) -> Result<bool, String>,
@@ -200,7 +231,15 @@ where
         let x = c.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let y = c.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
         // 每一步都重新读一次矩形(窗口可能正在被用户拖动)。
-        let rect = native::rec::exclude_rect();
+        //
+        // **只有在窗口没穿透时才需要跳过**:穿透了的话,点击会正常落到
+        // 下面的应用上(那才是回放要点的目标),跳过反而会让回放少点几下
+        // —— 而那些点击往往正是"点进输入框"的位置。
+        let rect = if skip_own_window {
+            native::rec::exclude_rect()
+        } else {
+            None
+        };
         if native::in_exclude(&rect, x, y) {
             // 落点在自己窗口上 ⇒ **不发**。发出去就是点自己界面的按钮。
             skipped += 1;
@@ -242,6 +281,7 @@ where
 /// 返回 `true` = 真的起了回放;`false` = **被拒绝**(上一次回放还没结束)。
 /// 调用方要把"被拒绝"如实告诉用户,不能假装开始了。
 pub fn spawn_playback(
+    app: Option<AppHandle>,
     file: String,
     clicks: Vec<Value>,
     interval: f64,
@@ -257,6 +297,9 @@ pub fn spawn_playback(
         );
         return false;
     }
+    // **窗口穿透**:回放期间让窗口不接收鼠标事件,
+    // 这样回放的点击能落到下面的目标应用上(见 set_window_passthrough 的说明)。
+    let penetrated = set_window_passthrough(&app, true);
     let planned = clicks.len();
     set_status(PlaybackStatus {
         file: file.clone(),
@@ -270,9 +313,12 @@ pub fn spawn_playback(
     let handle = thread::Builder::new()
         .name("cnc-playback".to_string())
         .spawn(move || {
-            // 线程结束(哪怕 panic)都要把 PLAYING 复位,否则回放再也起不来。
-            let _guard = PlayingGuard;
-            let (executed, skipped, error) = run_clicks(&clicks, interval, inputs.as_deref());
+            // 线程结束(哪怕 panic)都要把 PLAYING 复位 + 窗口恢复可点,
+            // 否则回放再也起不来、而且窗口会一直"点不动"。
+            let _guard = PlayingGuard { app: app.clone() };
+            // 穿透失败才需要"跳过落在自己窗口上的点击"(兜底)。
+            let (executed, skipped, error) =
+                run_clicks_with(&clicks, interval, inputs.as_deref(), native::mouse_click, !penetrated);
             let mut st = last_status().unwrap_or_default();
             st.file = file;
             st.executed = executed;
@@ -308,6 +354,8 @@ pub fn play_file(
     interval: Option<f64>,
     input_text: Option<String>,
 ) -> Result<Value, String> {
+    // read_file 会把 app 拿走,这里先留一份给回放用(回放要靠它开窗口穿透)。
+    let app_for_playback = app.clone();
     // read_file 读不到会返回 None(文件不存在 / 解析失败)→ 把原因带给界面
     let data = match appcmd::read_file(app, file_name.clone()) {
         Ok(Some(d)) => d,
@@ -336,7 +384,7 @@ pub fn play_file(
 
     let interval = interval.unwrap_or(0.5);
     let inputs = resolve_inputs(&clicks, input_text.as_deref());
-    if !spawn_playback(file_name.clone(), clicks, interval, inputs) {
+    if !spawn_playback(Some(app_for_playback), file_name.clone(), clicks, interval, inputs) {
         // 被拒绝(上一次回放还没结束)⇒ 如实报错,不能让界面以为"开始执行了"。
         return Ok(json!({
             "status": "error",
@@ -348,12 +396,12 @@ pub fn play_file(
 
 /// 直接回放一段点击数据(不经过文件)。
 #[tauri::command]
-pub fn play_data(clicks: Vec<Value>, interval: Option<f64>) -> Result<Value, String> {
+pub fn play_data(app: AppHandle, clicks: Vec<Value>, interval: Option<f64>) -> Result<Value, String> {
     if clicks.is_empty() {
         return Ok(json!({ "status": "error", "message": "没有可执行的点击" }));
     }
     let interval = interval.unwrap_or(0.5);
-    if !spawn_playback(String::new(), clicks, interval, None) {
+    if !spawn_playback(Some(app), String::new(), clicks, interval, None) {
         return Ok(json!({
             "status": "error",
             "message": "上一次回放还没结束,这次没有重复执行",
@@ -378,7 +426,7 @@ mod tests {
         // 假装"已经在回放"
         PLAYING.store(true, Ordering::SeqCst);
         let clicks = vec![json!({"x": 10.0, "y": 20.0})];
-        let started = spawn_playback("测试".to_string(), clicks, 0.0, None);
+        let started = spawn_playback(None, "测试".to_string(), clicks, 0.0, None);
         PLAYING.store(false, Ordering::SeqCst); // 复原,别影响别的用例
         assert!(!started, "已经在回放时,这次必须被拒绝");
         assert!(
@@ -406,7 +454,7 @@ mod tests {
         let (executed, skipped, _err) = run_clicks_with(&clicks, 0.0, None, |x, y| {
             sent.push((x, y));
             Ok(true)
-        });
+        }, true);
         native::rec::set_exclude_rect(None);
         assert_eq!(skipped, 1, "落在自己窗口上的那一条必须被丢掉");
         assert_eq!(executed, 1, "窗口外的那一条要真的去发");
@@ -441,12 +489,17 @@ pub fn diagnose_playback_guard(app: tauri::AppHandle) -> Result<serde_json::Valu
     if !crate::commands::native::in_exclude(&Some(rect), x, y) {
         return Err("排除判定没生效,拒绝起回放(否则会真的点到屏幕上)".to_string());
     }
+    // **窗口穿透**能不能开?(只开关一下,不涉及任何点击)
+    let passthrough_ok = set_window_passthrough(&Some(app.clone()), true);
+    set_window_passthrough(&Some(app.clone()), false); // 立刻恢复
     // 20 条落点全在自己窗口内;间隔 50ms ⇒ 回放要跑 ~3 秒,
     // 第二次调用一定撞在它还在跑的时候 ⇒ 应该被拒绝。
     let clicks: Vec<Value> = (0..20).map(|_| json!({"x": x, "y": y})).collect();
+    // 刻意传 `None`(不开穿透)⇒ 落点在自己窗口上的点击会被**丢掉**,
+    // **一个字节都不会发到用户屏幕上**。
     // 直接用 spawn_playback(它返回"真的起了没有"),不去绕命令层的返回形状。
-    let first = spawn_playback("自检".to_string(), clicks.clone(), 0.05, None);
-    let second = spawn_playback("自检".to_string(), clicks, 0.05, None);
+    let first = spawn_playback(None, "自检".to_string(), clicks.clone(), 0.05, None);
+    let second = spawn_playback(None, "自检".to_string(), clicks, 0.05, None);
     // 等回放跑完(20 × (100 + 50) ms + 余量)
     thread::sleep(Duration::from_millis(20 * 150 + 500));
     let st = last_status();
@@ -457,6 +510,7 @@ pub fn diagnose_playback_guard(app: tauri::AppHandle) -> Result<serde_json::Valu
         "skipped": st.as_ref().map(|s| s.skipped),
         "rejected": rejected_count(),
         "playing": is_playing(),
-        "sideEffects": "无:落点全在自己窗口内(回放时被丢掉),且没有 input_text(不会键入)",
+        "passthroughOk": passthrough_ok,
+        "sideEffects": "无:自检**不开**窗口穿透(传 None)⇒ 落点全在自己窗口内被丢掉;没有 input_text(不会键入)",
     }))
 }
