@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use rayon::prelude::*;
 use ttf_parser::Face;
 
 use crate::glyph::db::{FastGlyphMatcher, GlyphDb};
@@ -408,40 +409,57 @@ fn analyze_font(
     let window = RasterWindow::CANONICAL;
 
     let mut per_char: HashMap<char, CharInfo> = HashMap::new();
-    for ch in font_codepoints(&face) {
-        let Some(coverage) = coverage_for_char(&face, ch, 48, window) else {
-            continue;
-        };
-        let coverage = quantize(&coverage);
-        let cp = ch as u32;
-        let self_distance = match db.index_of_codepoint(cp) {
-            Some(idx) => db.distance_to_index(idx, &coverage),
-            None => 1.0,
-        };
-        if self_distance < t.replace_self_distance {
-            // 画的就是它自己 → 不用改
-            per_char.insert(
+    // 逐码位算判定结果 —— 各码位互不依赖,**并行算**。
+    //
+    // 一份混淆字体有上百个码位,每个都要:栅格化 → 与参考库比对 → 取最近邻。
+    // **串行实测 11 秒**(2026-10-23,真实站点那份 font-cxsecret)。
+    // 这 11 秒里页面上一份映射都没有 → 用户"换题后立刻复制"必然复制出密文
+    // (这正是"第一次成功、后两次失败"的原因之一:
+    //  第一份字体的结果被缓存了,换到新字体就是缓存不命中,又要等一遍)。
+    //
+    // 并行后按核数缩短(本机 10 核)。**判定口径一个字都没改**:
+    // 每个码位独立算,谁也不依赖谁,谁也不看顺序。
+    let codepoints = font_codepoints(&face);
+    let computed: Vec<(char, CharInfo)> = codepoints
+        .par_iter()
+        .filter_map(|ch| {
+            let ch = *ch;
+            let Some(coverage) = coverage_for_char(&face, ch, 48, window) else {
+                return None;
+            };
+            let coverage = quantize(&coverage);
+            let cp = ch as u32;
+            let self_distance = match db.index_of_codepoint(cp) {
+                Some(idx) => db.distance_to_index(idx, &coverage),
+                None => 1.0,
+            };
+            if self_distance < t.replace_self_distance {
+                // 画的就是它自己 → 不用改
+                return Some((
+                    ch,
+                    CharInfo {
+                        plain: None,
+                        score: 0.0,
+                        margin: 0.0,
+                        self_distance,
+                    },
+                ));
+            }
+            let raw = matcher.lookup(&coverage, t.max_candidates);
+            let picked = pick_candidate(&raw, &t);
+            Some((
                 ch,
                 CharInfo {
-                    plain: None,
-                    score: 0.0,
-                    margin: 0.0,
+                    plain: picked.codepoint,
+                    score: picked.score,
+                    margin: picked.margin,
                     self_distance,
                 },
-            );
-            continue;
-        }
-        let raw = matcher.lookup(&coverage, t.max_candidates);
-        let picked = pick_candidate(&raw, &t);
-        per_char.insert(
-            ch,
-            CharInfo {
-                plain: picked.codepoint,
-                score: picked.score,
-                margin: picked.margin,
-                self_distance,
-            },
-        );
+            ))
+        })
+        .collect();
+    for (ch, info) in computed {
+        per_char.insert(ch, info);
     }
 
     // **字体级闸门**:分母是**字体的码位数**。
