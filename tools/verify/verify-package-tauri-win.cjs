@@ -58,33 +58,65 @@ if (installer) {
 }
 
 // ② 主程序 exe
-const exe = path.join(TARGET, 'simuinput-tauri.exe');
-const exeExists = fs.existsSync(exe);
-check('主程序 exe 已生成', exeExists, exeExists ? exe : '(没找到 —— 打包那步失败了吗?)');
-if (exeExists) {
+//    正常在 target/release/<包名>.exe;找不到就在那一层里找任意 .exe
+//    (Tauri 打包时会把它拷进 NSIS 暂存目录,名字可能被改成产品名)。
+function findExe(dir) {
+  const direct = path.join(dir, 'simuinput-tauri.exe');
+  if (fs.existsSync(direct)) return direct;
+  try {
+    const exes = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.exe'))
+      .map((e) => path.join(dir, e.name));
+    return exes[0] || null;
+  } catch (_) {
+    return null;
+  }
+}
+const exe = findExe(TARGET);
+check('主程序 exe 已生成', !!exe, exe || '(没找到 —— 打包那步失败了吗?)');
+if (exe) {
   const size = fs.statSync(exe).size;
   // 前端是**嵌进二进制**的 ⇒ 一个空壳 exe 不会有几百 KB。
   check('主程序含前端产物(体积说得过去)', size > 512 * 1024, `${(size / 1024).toFixed(0)} KB`);
 }
 
 // ③ 字形参考库:在产物目录里,且与仓库里那份逐字节相同
-//    (运行时找它的两个位置都认:resources/ 下,或与主程序平级 —— 见 safari/repair.rs)
+//
+//    **不猜它被放在哪**:在 target/release 下面**递归找**(跳过 cargo 的
+//    deps/build/incremental),找到的每一份都要与仓库里那份逐字节相同。
+//    为什么递归找:不同的 Tauri 版本把它放在 exe 旁边还是 resources/ 下
+//    未必一样 —— 但「它必须进了产物目录」这件事是不变的。
 const srcDb = path.join(SRC_TAURI, 'resources', 'glyph-db-48.crdb.gz');
-const dbCandidates = [
-  path.join(TARGET, 'resources', 'glyph-db-48.crdb.gz'),
-  path.join(TARGET, 'glyph-db-48.crdb.gz'),
-];
-const outDb = dbCandidates.find((p) => fs.existsSync(p));
-check('产物目录里有字形参考库', !!outDb,
-  outDb || ('没找到 —— 找过: ' + dbCandidates.join(' / ')));
-if (fs.existsSync(srcDb) && outDb) {
+const SKIP_DIRS = new Set(['deps', 'build', 'incremental', '.fingerprint', '.cargo-lock']);
+function findResourceFiles(dir, depth, out) {
+  if (depth > 4 || !fs.existsSync(dir)) return out;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return out; }
+  for (const e of entries) {
+    if (SKIP_DIRS.has(e.name)) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) findResourceFiles(full, depth + 1, out);
+    else if (e.name === 'glyph-db-48.crdb.gz') out.push(full);
+  }
+  return out;
+}
+const dbFiles = findResourceFiles(TARGET, 0, []);
+check('产物目录里有字形参考库', dbFiles.length > 0,
+  dbFiles.length ? dbFiles.map((p) => path.relative(TARGET, p)).join(', ') : '(在 ' + TARGET + ' 下面没找到)');
+if (fs.existsSync(srcDb) && dbFiles.length) {
   const a = fs.readFileSync(srcDb);
-  const b = fs.readFileSync(outDb);
-  check('字形参考库与仓库里那份逐字节相同', a.equals(b),
-    `仓库 ${a.length} 字节 / 产物 ${b.length} 字节`);
+  let allSame = true;
+  let detail = '';
+  for (const f of dbFiles) {
+    const b = fs.readFileSync(f);
+    if (!a.equals(b)) { allSame = false; detail = `${f} 与仓库里那份不一样`; break; }
+    detail = `${dbFiles.length} 份,都是 ${a.length} 字节`;
+  }
+  check('字形参考库与仓库里那份逐字节相同', allSame, detail);
   // 再解一次:确认不是"看着一样、其实压坏了"
   try {
-    const raw = zlib.gunzipSync(b);
+    const raw = zlib.gunzipSync(fs.readFileSync(dbFiles[0]));
     check('字形参考库能解开(gzip 完好)', raw.length > 0, `解开 ${raw.length} 字节`);
   } catch (e) {
     check('字形参考库能解开(gzip 完好)', false, e.message);
