@@ -148,6 +148,41 @@ async function gotoStep(page, index) {
   await new Promise((r) => setTimeout(r, 500));
 }
 
+/**
+ * 等布局**稳定**再量(别量动画中间态)。
+ *
+ * ## 为什么要有这个
+ *
+ * 面板切换有 **0.4s 的高度动画**。之前是「点完睡 500ms 就量」——
+ * CI 机器慢的时候,500ms 里动画**还没走完** ⇒ 量到的是**动画中间态**
+ * (内容区只剩几十像素高)⇒ 误判成「内容被藏进滚动条了」。
+ *
+ * 真实踩到:2026-10-24 的 mac CI 报「第2页(可视36/内容84)」——
+ * **36px 明显是动画中间态**,不是真的裁切(那一页的内容本来就不高)。
+ *
+ * 改成:**轮询到尺寸不再变化**才算数。
+ */
+async function waitForStableLayout(page, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let m = await probeLayout(page);
+  let last = '';
+  let stable = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 150));
+    m = await probeLayout(page);
+    const key = `${m.cardH}:${m.scrollerClientH}:${m.scrollerScrollH}`;
+    if (key === last) {
+      stable += 1;
+      // 连续两次一样 ⇒ 动画结束了
+      if (stable >= 2) return m;
+    } else {
+      stable = 0;
+      last = key;
+    }
+  }
+  return m;
+}
+
 /** 量卡片与内容区:高度、底边、有没有被裁 */
 async function probeLayout(page) {
   return page.evaluate(() => {
@@ -199,7 +234,9 @@ async function probeLayout(page) {
       let clippedPages = [];
       for (let i = 0; i < 4; i += 1) {
         await gotoStep(page, i);
-        const m = await probeLayout(page);
+        // **等布局稳定再量** —— 别量到面板切换动画的中间态
+        // (2026-10-24 的 mac CI 在这里误报过一次:「第2页(可视36/内容84)」)。
+        const m = await waitForStableLayout(page);
         if (m.clipped) clippedPages.push(`第${i + 1}页(可视${m.scrollerClientH}/内容${m.scrollerScrollH})`);
       }
       check('4 个页面的功能都完整展示(没有被藏进滚动条)', clippedPages.length === 0, clippedPages.join(' '));
@@ -226,7 +263,7 @@ async function probeLayout(page) {
       await page.goto(base, { waitUntil: 'networkidle0' });
       await new Promise((r) => setTimeout(r, 600));
       await gotoStep(page, 3);
-      const m = await probeLayout(page);
+      const m = await waitForStableLayout(page);
       check('窗口比内容矮时卡片不被压扁', m.cardH > 300, `卡片高 ${m.cardH}`);
       check(
         '窗口比内容矮时内容在滚动容器里(翻得到,没被根容器一刀切)',
