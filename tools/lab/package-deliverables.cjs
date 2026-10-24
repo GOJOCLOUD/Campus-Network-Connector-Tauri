@@ -26,12 +26,15 @@
  * 统一从 CI 的 release 里取:
  *   - Tauri   → release `win-tauri-<run_id>`
  *   - Electron → release `win-<run_id>`
- * 脚本会自动挑**最新的**那个 win release;要指定就设环境变量
- * `WIN_TAURI_TAG` / `WIN_ELECTRON_TAG`。
+ * 脚本会自动挑**最新的**那个 win release —— 判据是标签末尾的 **run_id**
+ * (单调递增),**不是** createdAt:同一批 release 的 createdAt 常常并列,
+ * 按它排会挑中并列里最旧的那个,于是把**旧包**当成最新包发出去。
+ * 要指定就设环境变量 `WIN_TAURI_TAG` / `WIN_ELECTRON_TAG`。
  *
  * ## 清理
- * 旧的 `模拟输入-win-x64-安装包.zip`(被合并包取代)与桌面上的 `*.dmg`
- * 会被移进**可恢复回收站**(不是永久删除),动作会打印出来。
+ * 旧的 `模拟输入-win-x64-安装包.zip`(被合并包取代)与桌面上**属于本项目**的
+ * `*.dmg` 会被移进**可恢复回收站**(不是永久删除),动作会打印出来。
+ * 别人的 dmg 一律保留 —— 交付脚本只管自己造的东西。
  */
 const fs = require('fs');
 const os = require('os');
@@ -79,14 +82,37 @@ function sh(cmd, args, opts) {
   return execFileSync(cmd, args, { encoding: 'utf8', ...opts });
 }
 
-/** 最新的 win release 标签(按创建时间)。 */
+/**
+ * release 标签里的 **run_id**(数字)。GitHub Actions 的 run id 单调递增,
+ * 拿它排序比 createdAt 可靠 —— 见 latestWinTag 的说明。
+ */
+function runIdOf(tagName) {
+  const m = /(\d{6,})\s*$/.exec(String(tagName));
+  return m ? Number(m[1]) : -1;
+}
+
+/**
+ * 最新的 win release 标签。
+ *
+ * ⚠️ **不能只按 createdAt 排序**:同一个工作流批次里的多个 release
+ * (mac + win + 各自的补跑)常常是**同一秒创建**的 ⇒ createdAt 并列 ⇒
+ * 稳定排序会保留 `gh release list` 的原序(新的在前),再取"最后一个"
+ * 拿到的是**并列里最旧的那个** —— 于是交付脚本会拿一个**旧包**当最新包发出去。
+ *
+ * 判据:标签末尾的 run_id 单调递增(Windows 产物的 run id 越大 = 越晚的构建)。
+ * createdAt 只作为 run_id 缺失时的兜底。
+ */
 function latestWinTag(repo, prefix) {
   if (process.env.WIN_TAURI_TAG && repo === REPO_TAURI) return process.env.WIN_TAURI_TAG;
   if (process.env.WIN_ELECTRON_TAG && repo === REPO_ELECTRON) return process.env.WIN_ELECTRON_TAG;
   const out = sh('gh', ['release', 'list', '--repo', repo, '--limit', '50', '--json', 'tagName,createdAt']);
   const list = JSON.parse(out)
     .filter((r) => r.tagName.startsWith(prefix))
-    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    .sort((a, b) => {
+      const byRun = runIdOf(a.tagName) - runIdOf(b.tagName);
+      if (byRun) return byRun;
+      return String(a.createdAt).localeCompare(String(b.createdAt));
+    });
   if (!list.length) {
     console.error(`在 ${repo} 里找不到以 "${prefix}" 开头的 release`);
     process.exit(1);
@@ -327,8 +353,15 @@ function main() {
     toTrash(STALE_WIN_ZIP);
     console.log(`  已移入回收站: ${STALE_WIN_ZIP}(被「${path.basename(WIN_TARGET)}」取代)`);
   }
+  // 只清**本项目**的旧 dmg —— 桌面上别人的 dmg 不归我们管。
+  // (以前这里是「所有 *.dmg 一律移进回收站」,万一用户从别处下载了一个
+  //  dmg 到桌面,跑一次交付脚本就把它弄没了。)
   for (const f of fs.readdirSync(DESKTOP)) {
     if (!f.toLowerCase().endsWith('.dmg')) continue;
+    if (!/模拟输入|simuinput/i.test(f)) {
+      console.log(`  保留(不是本项目的交付物): ${f}`);
+      continue;
+    }
     const p = path.join(DESKTOP, f);
     toTrash(p);
     console.log(`  已移入回收站: ${p}(旧的 dmg 交付物)`);
