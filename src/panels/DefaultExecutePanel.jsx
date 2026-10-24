@@ -1,8 +1,8 @@
 /**
  * 第 2 步:默认执行 + 选择录制文件。
  *
- * Windows 版**只有这两步**(激活 + 默认执行):录制和快捷输入是 macOS 专属能力,
- * 在 Windows 上既用不上也跑不通,所以那边不出现这两个界面。
+ * Windows 版比 macOS 少「录制」这一步(按 ADR-0012,Windows 侧不做录制入口),
+ * 但**保留**「键盘输入」(Windows 直接送 Unicode 字符)。
  * Windows 上「管理录制文件」的入口挂在这里 —— 录制文件本身仍然要能挑/能改/能删。
  */
 import { createPortal } from 'react-dom'

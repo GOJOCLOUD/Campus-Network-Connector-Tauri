@@ -231,13 +231,13 @@ function App() {
     const onKeyDown = (e) => {
       // 快捷键:**⌃S** = 默认执行(回放)、**⌃D** = 读剪贴板并键入。
       // 只认 **Control**:不认 Win/Alt,也不要求 Shift(带 Shift 照样触发)——
-      // 与 mac 分支**逐字一致**(见 ADR-0013)。
+      // 两个平台**逐字一致**(见 ADR-0013)。
       //
       // ⚠️ ⌃D 这一条在 **Windows 上不走这里**:Windows 线的 ⌃D 由**主进程的全局
       //   快捷键**接管(读剪贴板 → `send_text` 逐字键入)。全局热键由系统吞掉按键,
       //   渲染进程**收不到** Ctrl+D 的 keydown ⇒ 不会两条路都触发
       //   (都触发 = 剪贴板内容被键入两遍)。
-      //   这里的 `!isWindows` 与 mac 分支保持一致 —— 别只改一边。
+      //   这里的 `!isWindows` 两个平台保持一致 —— 别只改一边。
       if (e.ctrlKey && e.code === 'KeyS') {
         e.preventDefault()
         defaultExecuteRef.current()
@@ -678,8 +678,8 @@ function App() {
           <DefaultExecutePanel {...defaultExecutePanelProps} />
         </Step>
 
-        {/* 以下两步是 macOS 专属:录制要事件监听,快捷输入要切换输入源。
-            Windows 版到「默认执行」为止,少两个界面但功能不缺。 */}
+        {/* 「模拟点击(录制)」这一步是 macOS 专属(按 ADR-0012,Windows 侧不做录制入口)。
+            下面的「键盘输入」两边都有 —— Windows 直接送 Unicode 逐字键入。 */}
         {!isWindows && (
           <Step>
             <ClickPanel {...clickPanelProps} />
