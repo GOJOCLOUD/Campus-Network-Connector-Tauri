@@ -54,7 +54,7 @@ function main() {
     console.log(`=== ${c.label} ===`);
     console.log(`  字体 cmap 里的码位总数     : ${cps.length}`);
     console.log(`  ├─ 密文码位（DOM 里那些字）: ${cipherInFont.length}`);
-    console.log(`  ├─ 明文字（题面真正���字）  : ${plainInFont.length}` +
+    console.log(`  ├─ 明文字（题面真正的字）  : ${plainInFont.length}` +
       (plainInFont.length ? '  ← ' + plainInFont.map((cp) => String.fromCodePoint(cp)).join('') : ''));
     console.log(`  └─ 其它                     : ${other.length}` +
       (other.length ? '  ← ' + other.map((cp) => String.fromCodePoint(cp)).join('') : ''));

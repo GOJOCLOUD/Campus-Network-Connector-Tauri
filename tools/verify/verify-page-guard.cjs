@@ -230,7 +230,7 @@ function installGuard(win, src, nowFn) {
     collect() {
       return win.__copyRepairCollect();
     },
-    /** 模拟"页面内容变了"（站���把题目文字渲染出来了）。 */
+    /** 模拟"页面内容变了"（站点把题目文字渲染出来了）。 */
     triggerDomChange() {
       for (const o of observers) if (!o.dead) o.callback([]);
     },
@@ -270,7 +270,7 @@ function suite(label, getSrc) {
     h.collect();
     const second = reportedGroups(h);
     assert.strictEqual(second.length, 1, '字体变了之后,新作用域必须被上报');
-    assert.notStrictEqual(second[0].scopeKey, scope1, '新字体的作用域指纹必须与旧的��同');
+    assert.notStrictEqual(second[0].scopeKey, scope1, '新字体的作用域指纹必须与旧的相同');
     assert.ok(second[0].scopeKey.startsWith('normal|400|font-cxsecret#'), '作用域键格式: ' + second[0].scopeKey);
   });
 
