@@ -35,6 +35,14 @@ pub use recording_stub as rec;
 #[cfg(target_os = "macos")]
 pub mod hotkey;
 
+// 快捷键的**行为核心**(判定 + latch 状态机)是**平台无关**的:
+// 两个平台跑的是**同一份**代码 —— macOS 的事件 tap 与 Windows 的全局热键
+// 只是"怎么知道键被按下了"不一样,「什么算命中」「触发后要不要等松开 Control」
+// 这两件事必须一字不差,所以下沉到这里。
+//
+// ⚠️ 这个文件**不许**出现 `cfg(target_os)` / `core_graphics` / `windows`。
+pub mod hotkey_core;
+
 #[cfg(target_os = "macos")]
 use macos as imp;
 #[cfg(target_os = "windows")]

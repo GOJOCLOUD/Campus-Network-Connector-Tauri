@@ -12,9 +12,10 @@ import { USER_AGREEMENT_MD, TRIAL_SECONDS } from './lib/user-agreement'
 const cnc = window.cnc || {};
 // macOS 用原生红绿灯,其它平台才需要自绘关闭按钮
 const isMac = cnc.platform === 'darwin';
-// Windows 版是**精简版**:只保留「激活 + 默认执行(回放/挑文件)」。
-// 录制(ClickPanel)和快捷输入(KeyboardPanel)都依赖 macOS 原生能力
-// (CoreGraphics 事件监听 / 输入源切换),在 Windows 上跑不通也不需要,故不出现。
+// Windows 版是**精简版**:比 macOS 少「录制」这一步(ClickPanel)。
+// 录制依赖 macOS 专属的 CoreGraphics 事件监听,Windows 线**不做**(ADR-0012);
+// 但「键盘输入」(拼音自动键入)**保留** —— Windows 直接送 Unicode 字符,
+// 不需要输入源切换,功能不缺。
 const isWindows = cnc.platform === 'win32';
 
 function App() {
@@ -228,6 +229,15 @@ function App() {
     // 这里原本还会往屏幕最底下贴一条黑色调试条(显示按键信息)——
     // 那条带子已经删掉了(挡住屏幕底下的内容),但快捷键保留。
     const onKeyDown = (e) => {
+      // 快捷键:**⌃S** = 默认执行(回放)、**⌃D** = 读剪贴板并键入。
+      // 只认 **Control**:不认 Win/Alt,也不要求 Shift(带 Shift 照样触发)——
+      // 与 mac 分支**逐字一致**(见 ADR-0013)。
+      //
+      // ⚠️ ⌃D 这一条在 **Windows 上不走这里**:Windows 线的 ⌃D 由**主进程的全局
+      //   快捷键**接管(读剪贴板 → `send_text` 逐字键入)。全局热键由系统吞掉按键,
+      //   渲染进程**收不到** Ctrl+D 的 keydown ⇒ 不会两条路都触发
+      //   (都触发 = 剪贴板内容被键入两遍)。
+      //   这里的 `!isWindows` 与 mac 分支保持一致 —— 别只改一边。
       if (e.ctrlKey && e.code === 'KeyS') {
         e.preventDefault()
         defaultExecuteRef.current()
@@ -542,7 +552,10 @@ function App() {
     filesLoading,
     jsonFiles,
     onSelectFile: (name) => { setSelectedJson(name); setShowJsonDropdown(false) },
-    // Windows 上没有录制界面 → 把「管理录制文件」的入口挂在这一步
+    // 「管理录制文件」的入口:macOS 上在「模拟点击」那一步里,
+    // Windows 上没有那一步 ⇒ 挂在「默认执行」这一步。
+    // (补了「键盘输入」那一步之后**仍然**挂在这里 —— 它管的是录制文件,
+    //  和「键盘输入」没关系。)
     showManage: isWindows,
     isManageMode,
     onManage: handleManage,
@@ -632,7 +645,15 @@ function App() {
         nextButtonText="下一步"
         disableStepIndicators={!isActivated}
         nextDisabled={!isActivated}
-        hideCompleteButton={isWindows}
+        // 「完成」按钮:**显示**(和 macOS 一致)。
+        //
+        // 最后一步点「完成」会把整个面板**收起**(isCompleted → 高度 0),
+        // 收起后还能靠顶上的步骤圈再点回来。
+        // 以前 Windows 少一步、最后一步正是主操作界面「默认执行」——
+        // 那一屏被收起就没法操作了,所以那时候把这个按钮藏了。
+        // 2026-10-24 确认「键盘输入」这一步在 Windows 上也保留之后,
+        // 最后一步不再是主操作界面 ⇒ 按钮照常显示。
+        hideCompleteButton={false}
         corner={
           /* macOS 用原生红绿灯(见 main.js 的 titleBarStyle/trafficLightPosition),
              这里只给没有原生按钮的平台兜底 */

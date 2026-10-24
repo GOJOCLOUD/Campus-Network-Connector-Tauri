@@ -37,27 +37,20 @@ use core_graphics::event::{
     CGEventType, EventField,
 };
 
+// **平台无关**的行为核心:「什么算命中」+「触发后要不要等松开 Control」。
+//
+// macOS 的事件 tap 与 Windows 的全局热键只是"怎么知道键被按下了"不一样,
+// 这两件事必须**一字不差** ⇒ 下沉到 `super::hotkey_core`,两个平台跑同一份代码。
+use super::hotkey_core::{
+    self, Hotkey, Latch, PrimaryKey, MOD_ALT, MOD_CONTROL, MOD_META, MOD_SHIFT,
+};
+
 /// macOS **虚拟键码**(不是字符):S=1、D=2。
 const KEY_S: i64 = 1;
 const KEY_D: i64 = 2;
 
-/// 命中的快捷键。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Hotkey {
-    /// ⌃S:默认执行(回放选中的录制文件)
-    Execute,
-    /// ⌃D:读剪贴板并键入
-    Paste,
-}
-
-impl Hotkey {
-    fn label(&self) -> &'static str {
-        match self {
-            Hotkey::Execute => "⌃S",
-            Hotkey::Paste => "⌃D",
-        }
-    }
-}
+/// 命中的快捷键 `Hotkey` —— **定义在平台无关的核心里**(两个平台同一份),
+/// 这里只做 macOS 侧的适配(见 `flags_to_mods` / `primary_of`)。
 
 struct TapState {
     /// tap 是否活着
@@ -86,22 +79,10 @@ struct TapState {
     latch: Latch,
 }
 
-/// 快捷键的**触发许可**(latch)。
+/// 快捷键的**触发许可(latch)** —— 实现在**平台无关**的核心里
+/// (`super::hotkey_core::Latch`),两个平台跑的是**同一份**状态机。
 ///
-/// ## 为什么要有
-///
-/// 用户的要求:
-/// > 「触发之后 Ctrl+D 整个按键就不再会继续影响它了,
-/// > 除非下一次重新按住 Ctrl,再点击相应的字母」
-///
-/// 也就是说:**触发一次就被"消费掉"** —— 之后 Control 还按着、字母再按
-/// 也不触发;**必须松开 Control 再重新按住**,才重新武装。
-///
-/// (不这么做的话,按住 Ctrl 连按 D 会连着触发好几次 —— 而「默认执行」
-/// 是**回放**,触发多次就是往屏幕上乱点。)
-///
-/// ## 规则(**Electron 版同口径**)
-///
+/// 规则(与 Electron 版同口径):
 /// - 触发 ⇒ `armed = false` 且 `blocked = true`;
 /// - **Control 松开** ⇒ `blocked = false`、`armed = true`(彻底解锁);
 /// - Control 按下 ⇒ **只有 `blocked == false` 时**才武装。
@@ -111,58 +92,8 @@ struct TapState {
 /// 如果这一下"按下"能把 latch 解开,用户按住 Ctrl 连按就会连着触发,
 /// 正好是 latch 要防的事。所以 `blocked` 只能由 **Control 松开**来清。
 ///
-/// ## 为什么单独抽成纯函数
-///
-/// 这段状态机是**行为的核心**,必须能被单测直接验 —— 而单测不能碰系统。
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Latch {
-    /// 当前允许触发吗
-    armed: bool,
-    /// 触发过了,在等 Control 松开
-    blocked: bool,
-}
-
-impl Latch {
-    /// 新建:初始是**允许**触发的(用户第一次按住 Control 就该能触发)。
-    fn new() -> Self {
-        Latch {
-            armed: true,
-            blocked: false,
-        }
-    }
-
-    /// Control 的状态变了(按下 / 松开)。
-    fn on_ctrl_change(&mut self, ctrl_down: bool) {
-        if ctrl_down {
-            // 按下:有阻塞就不武装(迟到的"按下"不能解除 latch)。
-            if !self.blocked {
-                self.armed = true;
-            }
-        } else {
-            // 松开:彻底解锁 —— 必须松开再重按,才能再触发。
-            self.blocked = false;
-            self.armed = true;
-        }
-    }
-
-    /// 试一次触发:匹配得上 **且** 已武装 ⇒ 触发,并**消费掉**这次许可。
-    ///
-    /// 返回 `None` = 不触发(没匹配上,或者还锁着)。
-    fn try_fire(&mut self, matched: Option<Hotkey>) -> Option<Hotkey> {
-        let hotkey = matched?;
-        if !self.armed {
-            return None;
-        }
-        self.armed = false;
-        self.blocked = true;
-        Some(hotkey)
-    }
-
-    /// 当前是不是允许触发(诊断用)。
-    fn is_armed(&self) -> bool {
-        self.armed
-    }
-}
+/// 为什么抽成纯函数:这段状态机是**行为的核心**,必须能被单测直接验 ——
+/// 而单测不能碰系统(ADR-0021)。
 
 /// 回头认的**时间窗**:主键按下后多久之内补齐修饰键还算数。
 ///
@@ -262,30 +193,46 @@ fn swallow(event: &CGEvent) -> Option<CGEvent> {
     Some(dead)
 }
 
+/// CGEventFlags → **平台无关**的修饰键位掩码。
+///
+/// 共享核心在 u8 位掩码空间里工作(两个平台同一份),
+/// macOS 的 `CGEventFlags` 只是一个位集合,转过去即可。
+fn flags_to_mods(flags: CGEventFlags) -> u8 {
+    let mut mods = 0u8;
+    if flags.contains(CGEventFlags::CGEventFlagShift) {
+        mods |= MOD_SHIFT;
+    }
+    if flags.contains(CGEventFlags::CGEventFlagControl) {
+        mods |= MOD_CONTROL;
+    }
+    if flags.contains(CGEventFlags::CGEventFlagAlternate) {
+        mods |= MOD_ALT;
+    }
+    if flags.contains(CGEventFlags::CGEventFlagCommand) {
+        mods |= MOD_META;
+    }
+    mods
+}
+
+/// macOS 的虚拟键码 → **平台无关**的主键。
+fn primary_of(keycode: i64) -> PrimaryKey {
+    match keycode {
+        KEY_S => PrimaryKey::S,
+        KEY_D => PrimaryKey::D,
+        _ => PrimaryKey::Other,
+    }
+}
+
 /// 事件是不是我们要的组合键(**纯函数版**)。
 ///
-/// 拆成纯函数是为了让单测**不碰系统**:单测在 CI 上没有「辅助功能」权限,
-/// 连构造事件源都可能失败,断言一旦依赖环境就会漂(2026-10-23 踩过这个坑)。
+/// 判定规则本身在**平台无关**的核心里(`hotkey_core::match_hotkey`)——
+/// macOS 的事件 tap 与 Windows 的全局热键跑的是**同一份**判定。
+/// 这里只负责把 macOS 的 `CGEventFlags` / 虚拟键码翻译过去。
 ///
-/// 只看"有没有 Control":多带 Fn、⌥、Shift 之类的一律忽略 —— 这正是系统热键做不到、
-/// 也是"必须按得极其精准"的来源。
+/// 拆成纯函数也是为了让单测**不碰系统**:单测在 CI 上没有「辅助功能」权限,
+/// 连构造事件源都可能失败,断言一旦依赖环境就会漂(2026-10-23 踩过这个坑)。
 fn match_hotkey_raw(keycode: i64, flags: CGEventFlags) -> Option<Hotkey> {
-    // **只认 Control** —— 不认 Command,也不要求 Shift。
-    //
-    // - 去掉 Shift:原来要「⌃⇧ + 字母」三个手指一起按,太别扭(用户原话:
-    //   「非得三个同时一起按」)。现在两个键就够。
-    // - **不认 Command**:⌘S 是「保存」、⌘D 是「书签」—— 认了就把系统的
-    //   保存/书签抢走。界面文案写的就是 `Control+…`,以它为准。
-    // - **不要求 Shift,但也不排斥它**:多带一个 Shift 照样触发(容错)。
-    let ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
-    if !ctrl {
-        return None;
-    }
-    match keycode {
-        KEY_S => Some(Hotkey::Execute),
-        KEY_D => Some(Hotkey::Paste),
-        _ => None,
-    }
+    hotkey_core::match_hotkey(primary_of(keycode), flags_to_mods(flags))
 }
 
 /// **有效**的修饰键 = 自己跟踪到的 ∪ 事件自带的。
@@ -307,16 +254,22 @@ fn effective_modifiers(tracked: CGEventFlags, from_event: CGEventFlags) -> CGEve
 ///
 /// `window` 是**时间窗**:只有"刚刚"(窗口内)按下的键才算 ——
 /// 防止"按住 S 打字半分钟,后来按了 ⌃"被误判成快捷键。
+///
+/// 判定在**平台无关**的核心里(`hotkey_core::find_pending_hotkey`),
+/// 这里只做 macOS 的键码/修饰键翻译。
 fn find_pending_hotkey(
     pressed: &[(i64, Instant)],
     modifiers: CGEventFlags,
     now: Instant,
     window: Duration,
 ) -> Option<(i64, Hotkey)> {
-    pressed
-        .iter()
-        .filter(|(_, at)| now.duration_since(*at) <= window)
-        .find_map(|(keycode, _)| match_hotkey_raw(*keycode, modifiers).map(|hk| (*keycode, hk)))
+    hotkey_core::find_pending_hotkey(
+        pressed,
+        primary_of,
+        flags_to_mods(modifiers),
+        now,
+        window,
+    )
 }
 
 /// 启动快捷键监听(独立线程 + 自己的 run loop,和录制那一套一样)。
