@@ -41,6 +41,16 @@ jobs:
       - name: frame-bridge regression test
         run: node --test tools/verify/verify-frame-bridge.cjs
 
+      # 硬门禁:平台界面自检(跑不过就不发包)。
+      # 盯的是「该藏的步骤有没有真的藏起来」:
+      #   - Windows 上不该出现的「模拟点击(录制)」与「默认执行(回放)」两步;
+      #   - 原生模块好好的,却报一条红底白字「原生模块加载失败」;
+      #   - 反过来也验:原生模块**真的坏了**时,那条横幅必须出现(免得它变成死代码)。
+      # 这条门禁以前**只在本机跑**(没接进 CI)⇒ 它护的东西没人护。2026-10-24 补上。
+      # 需要构建出来的 dist/ → 必须放在 "Build frontend" 之后。
+      - name: Platform UI self-check
+        run: node tools/verify/verify-ui-platforms.cjs
+
       # 参考库(glyph-db-48.crdb.gz)与页面守卫是**提交进仓库**的构建产物,
       # 这里不需要重建；要重建用 npm run build:reference-db / build:vendor。
       - name: Build Tauri .app

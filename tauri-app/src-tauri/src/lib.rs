@@ -279,6 +279,15 @@ fn window_maximize(app: tauri::AppHandle) {
     }
 }
 
+/// 窗口贴合内容时**实际**改过几次原生窗口尺寸(诊断用)。
+///
+/// 改一次窗口尺寸 = 一次 WebView 整页重排(Windows 上还是透明+无边框+置顶窗口,
+/// 代价更高)。这个数一多,就是肉眼可见的「切一步、窗口抖好几下」。
+///
+/// 出现在 `get_native_status` 的 `fitResizes` 字段里 —— 前端每 3 秒写一次的
+/// `diag.json` 会带着它,排查「Windows 上偏卡顿」时先看这个数。
+pub static FIT_RESIZE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 窗口贴合内容:把窗口**高度**收到前端报上来的内容实际高度。
 ///
 /// 为什么要有这条:窗口比可见面板大一圈时,那一圈**看不见的地方照样吃鼠标事件**
@@ -314,7 +323,9 @@ fn window_fit_to_content(app: tauri::AppHandle, height: f64) -> Result<(), Strin
         return Ok(());
     }
     let size = tauri::LogicalSize::new(cur.width as f64 / scale, want);
-    w.set_size(size).map_err(|e| e.to_string())
+    w.set_size(size).map_err(|e| e.to_string())?;
+    FIT_RESIZE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 /// 打开「系统设置 → 隐私与安全性 → 辅助功能」。

@@ -62,6 +62,16 @@ jobs:
       - name: UI regression test
         run: node --test tools/verify/verify-panel-transition.cjs tools/verify/verify-recording-ui.cjs
 
+      # 硬门禁:平台界面自检(跑不过就不发包)。
+      # 盯的是「该藏的步骤有没有真的藏起来」:
+      #   - Windows 上不该出现的「模拟点击(录制)」与「默认执行(回放)」两步;
+      #   - 原生模块好好的,却报一条红底白字「原生模块加载失败」;
+      #   - 反过来也验:原生模块**真的坏了**时,那条横幅必须出现(免得它变成死代码)。
+      # 这条门禁以前**只在本机跑**(没接进 CI)⇒ 它护的东西没人护。2026-10-24 补上。
+      # 需要构建出来的 dist/ → 必须放在 "Build frontend" 之后。
+      - name: Platform UI self-check
+        run: node tools/verify/verify-ui-platforms.cjs
+
       # Rust 单元测试放在**打包之前**:跑不过就不发包。
       # 这些测试盯的是"链路会不会又断一次"(守卫上报的字段名、注入脚本的字符串
       # 字面量、混淆字体能不能整份还原)—— 之前 Rust 侧一个测试都没有,

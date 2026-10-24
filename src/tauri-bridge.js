@@ -154,9 +154,13 @@ function installTauriBridge() {
   // **照样吃鼠标事件**(macOS 的透明窗口整块矩形都收事件),下面的 App
   // 就点不动了,还白占着桌面。
   //
-  // 高度以**卡片底边**为准(不是窗口高度,也不是根容器高度):卡片是内容高度,
-  // 与窗口高度无关,所以收窗口不会引发"收窄→测量变→再收窄"的抖动。
+  // 高度以**卡片底边**为准(不是窗口高度,也不是根容器高度)。
   // 宽度不动 —— 卡片宽度是定死的,动宽度会互相追着跑。
+  //
+  // ⚠️ 别被「卡片是内容高度、与窗口高度无关」这句话骗了(这里以前就是这么写的,
+  // 而它**是错的**):内容区的 max-height 是 65vh,跟着窗口高度走 ⇒
+  // 卡片高度**间接**跟着窗口高度走 ⇒ 量出来的窗口高度会跟当前窗口高度绕圈。
+  // 下面 `naturalCardHeight` 就是为了把这一圈拆掉。
   //
   // ⚠️ 卡片是 **React 渲染出来的**,而本文件是在 `main.jsx` 里 import 时
   // 同步执行的 —— 那时 `createRoot().render()` 还没跑,卡片**根本不存在**。
@@ -165,6 +169,46 @@ function installTauriBridge() {
   // 换页时内容超出窗口就被根容器的 overflow-hidden **横切一刀**。
   // 现在改成:卡片一出现就挂上,元素被换掉(整个 Stepper 重挂)就重新挂。
   const CARD_SELECTOR = '.rounded-4xl'
+
+  // 卡片**自然**高度:把内容区被 max-height 截掉的那一截,换回内容的真实高度。
+  //
+  // 为什么必须换:内容区(Stepper 里那个 overflow-y:auto 的容器)的 max-height
+  // 是 **65vh** —— 也就是**跟着窗口高度走**。于是「量窗口该多高」变成了一个圈:
+  //
+  //     窗口高度 → 65vh → 内容区高度 → 卡片高度 → 想要的窗口高度 → 窗口高度
+  //
+  // 每绕一圈就是一次**原生窗口尺寸变化**(WebView 整页重排;Windows 上还是
+  // 透明+无边框+置顶窗口,代价更高)。于是「切一步、窗口抖好几下」。
+  // Windows 上尤其明显:窗口起始只有 320 高,内容装不下,就一格一格往上爬
+  // (320 → 440 → 518 → 532),每一格都是一次重排。
+  //
+  // 换成「内容的自然高度」之后,算出来的窗口高度**与当前窗口高度无关**:
+  // ① 一次就算准,不会一格一格爬;
+  // ② 切步骤的 0.4s 动画里卡片高度一直在变,但算出来的 want 始终是同一个值
+  //    ⇒ 动画期间不会再触发任何 resize。
+  //
+  // 怎么量自然高度:内容区里那个 position:absolute 的滑页容器,
+  // 它的 offsetHeight 就是内容的真实高度(不受外层 max-height 影响);
+  // scrollHeight 同理(滚动区的高度与 max-height 无关)。
+  const naturalCardHeight = (card, rect) => {
+    const scroller = [...card.querySelectorAll('div')]
+      .find((d) => getComputedStyle(d).overflowY === 'auto')
+    if (!scroller) return rect.height
+    const rendered = scroller.offsetHeight
+    // 内容区整个收起来了(点「完成」之后)⇒ 就按现在这个高度收窗口,
+    // 别按「内容还在、只是折起来了」的高度留一大截空白。
+    if (!rendered) return rect.height
+    const kids = [...scroller.children].map((el) => el.offsetHeight || 0)
+    const natural = Math.max(scroller.scrollHeight, ...kids, 0)
+    if (!natural) return rect.height
+    // 卡片高度 = 步骤圈头 + 内容区(当前渲染高) + 按钮脚
+    // → 换成内容区用自然高度时的卡片高度
+    return rect.height - rendered + natural
+  }
+
+  // 上一次报给原生的目标高度。高度没变就别再叫原生改窗口:
+  // 那边每次都要查一次屏幕尺寸(current_monitor 会枚举显示器),不是免费的。
+  let lastFitWant = null
   const fitWindow = async () => {
     const card = document.querySelector(CARD_SELECTOR)
     if (!card) return
@@ -172,7 +216,10 @@ function installTauriBridge() {
     if (!rect || !rect.height) return
     // 卡片底边 + 下边距 + 一点余量(卡片的 shadow-md 往下扩约 6px,
     // 不留余量的话阴影会被窗口边缘硬切,面板看着像"被剪过")。
-    const want = Math.ceil(rect.bottom + 16)
+    const cardH = naturalCardHeight(card, rect)
+    const want = Math.ceil(rect.top + cardH + 16)
+    if (want === lastFitWant) return
+    lastFitWant = want
     try {
       await invoke('window_fit_to_content', { height: want })
     } catch (e) {
