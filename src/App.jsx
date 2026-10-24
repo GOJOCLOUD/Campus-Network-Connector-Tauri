@@ -12,9 +12,10 @@ import { USER_AGREEMENT_MD, TRIAL_SECONDS } from './lib/user-agreement'
 const cnc = window.cnc || {};
 // macOS 用原生红绿灯,其它平台才需要自绘关闭按钮
 const isMac = cnc.platform === 'darwin';
-// Windows 版是**精简版**:只保留「激活 + 默认执行(回放/挑文件)」。
-// 录制(ClickPanel)和快捷输入(KeyboardPanel)都依赖 macOS 原生能力
-// (CoreGraphics 事件监听 / 输入源切换),在 Windows 上跑不通也不需要,故不出现。
+// Windows 版是**精简版**:比 macOS 少「录制」这一步(ClickPanel)。
+// 录制依赖 macOS 专属的 CoreGraphics 事件监听,Windows 线**不做**(ADR-0012);
+// 但「键盘输入」(拼音自动键入)**保留** —— Windows 直接送 Unicode 字符,
+// 不需要输入源切换,功能不缺。
 const isWindows = cnc.platform === 'win32';
 
 function App() {
@@ -228,11 +229,11 @@ function App() {
     // 这里原本还会往屏幕最底下贴一条黑色调试条(显示按键信息)——
     // 那条带子已经删掉了(挡住屏幕底下的内容),但快捷键保留。
     const onKeyDown = (e) => {
-      if (e.ctrlKey && e.shiftKey && e.code === 'KeyA') {
+      if (e.ctrlKey && e.code === 'KeyS') {
         e.preventDefault()
         defaultExecuteRef.current()
       }
-      if (e.ctrlKey && e.shiftKey && e.code === 'KeyD' && !isWindows) {
+      if (e.ctrlKey && e.code === 'KeyD' && !isWindows) {
         e.preventDefault()
         setMessage('读取剪贴板中...')
         setTimeout(() => setMessage(''), 2000)
@@ -280,12 +281,11 @@ function App() {
       setCountdown(prev => {
         if (prev <= 1) {
           clearInterval(timer)
-          const left = window.screenX
-          const top = window.screenY
-          const right = left + window.outerWidth
-          const bottom = top + window.outerHeight
-          const excludeRect = [left, top, right, bottom]
-          cnc.startRecording(excludeRect)
+          // 「点自己界面上的按钮不算一次点击」由**原生层**负责:
+          // 排除矩形用原生窗口位置算,并在窗口每次移动/变高时刷新。
+          // 这里**不传**矩形 —— 前端那份 `window.screenX` 只是开始那一刻的
+          // 一张快照,窗口一动就过期了(点「结束」会被记成一次点击)。
+          cnc.startRecording()
             .then((ok) => {
               if (ok === true) {
                 setIsRecording(true)
@@ -307,7 +307,20 @@ function App() {
     cnc.stopRecording()
       .then((clickData) => {
         setIsRecording(false)
-        setMessage('录制已停止（返回 ' + (Array.isArray(clickData) ? clickData.length : 0) + ' 个点击）')
+        // null = 停止失败(这时**别**把界面上的记录清掉);
+        // 数组 = 原生那边拿到的点击。
+        // 停止那一刻录到的最后一次点击只有原生那边有(界面是 100ms 轮询,
+        // 可能差最后一次),所以以它为准。
+        const list = Array.isArray(clickData) ? clickData : null
+        if (list) {
+          setClicks(list)
+          setClickInputs(prev => {
+            const next = [...prev]
+            for (let i = 0; i < list.length; i += 1) next[i] = next[i] || ''
+            return next.slice(0, list.length)
+          })
+        }
+        setMessage('录制已停止（返回 ' + (list ? list.length : clicks.length) + ' 个点击）')
         setTimeout(() => setMessage(''), 1000)
       })
       .catch(() => { setMessage('停止失败'); setTimeout(() => setMessage(''), 1000) })
@@ -327,6 +340,16 @@ function App() {
         setTimeout(() => setMessage(''), 1000)
       })
       .catch(() => { setMessage('清空失败'); setTimeout(() => setMessage(''), 1000) })
+  }
+
+  // 单条删除:界面上每一条点击旁边有个「×」,点它只删这一条。
+  // 原生那边也要删**同一条** —— 两边都留着就对不上号了
+  // (原生那份是回放时真正用的)。
+  const handleDeleteClick = (index) => {
+    if (!(index >= 0 && index < clicks.length)) return
+    if (cnc.removeRecordingClick) cnc.removeRecordingClick(index)
+    setClicks(prev => prev.filter((_, i) => i !== index))
+    setClickInputs(prev => prev.filter((_, i) => i !== index))
   }
 
   const handleDefaultExecute = () => {
@@ -541,6 +564,7 @@ function App() {
     onManage: handleManage,
     onSave: handleSaveWithInputs,
     onClear: handleClear,
+    onDeleteClick: handleDeleteClick,
     jsonFiles,
     onRename: handleRename,
     onDelete: handleDelete,
@@ -634,8 +658,9 @@ function App() {
           <DefaultExecutePanel {...defaultExecutePanelProps} />
         </Step>
 
-        {/* 以下两步是 macOS 专属:录制要事件监听,快捷输入要切换输入源。
-            Windows 版到「默认执行」为止,少两个界面但功能不缺。 */}
+        {/* 「模拟点击(录制)」这一步是 macOS 专属:录制要 CoreGraphics 事件监听,
+            Windows 线按 ADR-0012 不做录制 ⇒ 这一步在 Windows 上不出现。
+            下面的「键盘输入」两边都有(见上面的 isWindows 注释)。 */}
         {!isWindows && (
           <Step>
             <ClickPanel {...clickPanelProps} />

@@ -324,9 +324,14 @@ function installTauriBridge() {
     },
 
     // Recording(CGEventTap,macOS 专有;Windows 线按 ADR-0012 不做录制)
-    startRecording: async (excludeRect) => {
+    //
+    // 「点自己界面上的按钮不算一次点击」由**原生层**负责:排除矩形用原生
+    // 窗口位置算,并且在窗口每次移动/变高时刷新(见 native.rs)。
+    // 所以这里**不传**矩形 —— 前端那份 `window.screenX` 只是开始录制时的
+    // 一张快照,窗口一动就过期(点「结束」会被记成一次点击)。
+    startRecording: async () => {
       try {
-        const ok = await invoke('start_recording', { excludeRect: excludeRect || [0, 0, 0, 0] });
+        const ok = await invoke('start_recording');
         return ok === true;
       } catch (e) {
         // Electron 版主进程失败时返回 {error: msg},界面按这个形状显示
@@ -349,6 +354,8 @@ function installTauriBridge() {
     },
     getRecordingClicks: () => invoke('get_recording_clicks').catch(() => []),
     clearRecordingClicks: () => invoke('clear_recording_clicks').catch(() => false),
+    // 删掉第 index 次点击(单条删除)
+    removeRecordingClick: (index) => invoke('remove_recording_click', { index }).catch(() => false),
     isRecording: () => invoke('is_recording').catch(() => false),
     tapFailed: () => invoke('tap_failed').catch(() => false),
 
