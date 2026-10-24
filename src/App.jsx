@@ -229,6 +229,15 @@ function App() {
     // 这里原本还会往屏幕最底下贴一条黑色调试条(显示按键信息)——
     // 那条带子已经删掉了(挡住屏幕底下的内容),但快捷键保留。
     const onKeyDown = (e) => {
+      // 快捷键:**⌃S** = 默认执行(回放)、**⌃D** = 读剪贴板并键入。
+      // 只认 **Control**:不认 Win/Alt,也不要求 Shift(带 Shift 照样触发)——
+      // 两个平台**逐字一致**(见 ADR-0013)。
+      //
+      // ⚠️ ⌃D 这一条在 **Windows 上不走这里**:Windows 线的 ⌃D 由**主进程的全局
+      //   快捷键**接管(读剪贴板 → `send_text` 逐字键入)。全局热键由系统吞掉按键,
+      //   渲染进程**收不到** Ctrl+D 的 keydown ⇒ 不会两条路都触发
+      //   (都触发 = 剪贴板内容被键入两遍)。
+      //   这里的 `!isWindows` 两个平台保持一致 —— 别只改一边。
       if (e.ctrlKey && e.code === 'KeyS') {
         e.preventDefault()
         defaultExecuteRef.current()
@@ -543,7 +552,10 @@ function App() {
     filesLoading,
     jsonFiles,
     onSelectFile: (name) => { setSelectedJson(name); setShowJsonDropdown(false) },
-    // Windows 上没有录制界面 → 把「管理录制文件」的入口挂在这一步
+    // 「管理录制文件」的入口:macOS 上在「模拟点击」那一步里,
+    // Windows 上没有那一步 ⇒ 挂在「默认执行」这一步。
+    // (补了「键盘输入」那一步之后**仍然**挂在这里 —— 它管的是录制文件,
+    //  和「键盘输入」没关系。)
     showManage: isWindows,
     isManageMode,
     onManage: handleManage,
@@ -666,9 +678,8 @@ function App() {
           <DefaultExecutePanel {...defaultExecutePanelProps} />
         </Step>
 
-        {/* 「模拟点击(录制)」这一步是 macOS 专属:录制要 CoreGraphics 事件监听,
-            Windows 线按 ADR-0012 不做录制 ⇒ 这一步在 Windows 上不出现。
-            下面的「键盘输入」两边都有(见上面的 isWindows 注释)。 */}
+        {/* 「模拟点击(录制)」这一步是 macOS 专属(按 ADR-0012,Windows 侧不做录制入口)。
+            下面的「键盘输入」两边都有 —— Windows 直接送 Unicode 逐字键入。 */}
         {!isWindows && (
           <Step>
             <ClickPanel {...clickPanelProps} />

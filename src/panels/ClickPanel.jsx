@@ -1,8 +1,8 @@
 /**
  * 第 3 步:模拟点击(录制 / 回放),以及「管理录制文件」视图。
  *
- * 注意:**这个面板只在 macOS 上出现**。Windows 版没有录制能力(录制依赖 macOS 的
- * 事件监听),那一侧只保留「选择/管理录制文件 + 回放」,见 DefaultExecutePanel。
+ * 注意:**这个面板只在 macOS 上出现**。Windows 按 ADR-0012 不做录制入口
+ * (界面上不露出),那一侧只保留「选择/管理录制文件 + 回放」,见 DefaultExecutePanel。
  */
 import ManageFilesPanel from './ManageFilesPanel'
 
