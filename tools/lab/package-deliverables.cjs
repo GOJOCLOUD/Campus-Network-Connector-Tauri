@@ -235,9 +235,24 @@ function zipWin(exes, target) {
   }
 }
 
+/**
+ * ad-hoc **整包**签名 —— 只为了让签名**有效**。
+ *
+ * 只用 ad-hoc,不用真证书:真证书当初是为了让「辅助功能」授权跨版本留住才加的,
+ * 而**重新安装要重新授权是正常代价** —— 不为它维护任何额外机制。
+ */
+function signAppAdHoc(appPath) {
+  const bundleId = sh('plutil', [
+    '-extract', 'CFBundleIdentifier', 'raw', '-o', '-',
+    path.join(appPath, 'Contents', 'Info.plist'),
+  ]).trim();
+  sh('codesign', [
+    '--force', '--deep', '--sign', '-', '--identifier', bundleId, appPath,
+  ]);
+}
+
 /** 移进可恢复回收站(不永久删除)。 */
-function toTrash(target) {
-  const trash = path.join(os.homedir(), '.minimax', 'bin', 'mavis-trash');
+function toTrash(target) {  const trash = path.join(os.homedir(), '.minimax', 'bin', 'mavis-trash');
   if (fs.existsSync(trash)) {
     sh(trash, ['--', target]);
   } else {
@@ -296,6 +311,32 @@ function selfCheckBeforePack() {
     process.exit(1);
   }
   console.log(`  ✔ Tauri 版产物齐全(${need.length} 项)`);
+
+  // ③ 签名必须**有效**。
+  //
+  // Tauri 的构建产物只有链接器的 ad-hoc 签名(没有 `_CodeSignature` 资源封印),
+  // `codesign --verify` 会报「code has no resources but signature indicates they
+  // must be present」—— 那是**无效签名**,Gatekeeper 判成「应用已损坏」,
+  // 比「无法验证开发者」更难绕过(右键也开不了)。
+  //
+  // ⇒ 出包前统一 ad-hoc **整包**签一次,只为了让签名有效。
+  //   跟「辅助功能」授权能不能留住**无关** —— 重新安装要重新授权是正常代价,
+  //   不为它做任何额外机制(不追证书、不追授权状态)。
+  for (const [label, appPath] of [
+    ['Tauri 版', MAC_APP_TAURI],
+    ['Electron 版', MAC_APP_ELECTRON],
+  ]) {
+    try {
+      if (label === 'Tauri 版') signAppAdHoc(appPath);
+      sh('codesign', ['--verify', '--deep', '--strict', appPath]);
+      console.log(`  ✔ ${label}签名有效`);
+    } catch (err) {
+      console.error(`  ✖ ${label}签名无效 ⇒ **不出包**`);
+      console.error(`    ${String(err.stderr || err.message || err).trim()}`);
+      console.error('    (无效签名会被 Gatekeeper 判成「应用已损坏」,右键也开不了)');
+      process.exit(1);
+    }
+  }
 }
 
 function main() {
