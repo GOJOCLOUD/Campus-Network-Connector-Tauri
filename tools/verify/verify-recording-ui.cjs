@@ -113,33 +113,7 @@ function serveDist(dist) {
   });
 }
 
-function resolveExecutablePath() {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
-  const roots = [
-    path.join(process.env.HOME || '', '.cache', 'puppeteer'),
-    path.join(process.env.HOME || '', 'Library', 'Caches', 'puppeteer'),
-  ];
-  const names = ['Google Chrome for Testing', 'chrome-headless-shell', 'Chromium'];
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    for (const dir of fs.readdirSync(root)) {
-      if (!dir.startsWith('chrome')) continue;
-      const stack = [path.join(root, dir)];
-      while (stack.length) {
-        const cur = stack.pop();
-        let entries = [];
-        try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch (_) { continue; }
-        for (const e of entries) {
-          const full = path.join(cur, e.name);
-          if (e.isDirectory()) stack.push(full);
-          else if (names.includes(e.name) && fs.statSync(full).size > 0) return full;
-        }
-      }
-    }
-  }
-  return undefined;
-}
-
+const { resolveExecutablePath } = require('../chrome-path.cjs');
 /** 有没有某个文字的按钮(**只看,不许点** —— 「清空」一点就把列表清了) */
 const HAS_TEXT = (text) =>
   [...document.querySelectorAll('button')].some((b) => (b.textContent || '').trim() === text);

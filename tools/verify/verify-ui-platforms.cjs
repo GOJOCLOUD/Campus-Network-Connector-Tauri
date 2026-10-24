@@ -89,44 +89,7 @@ function check(name, ok, detail) {
  * (例:缓存 155.0.8059.79,puppeteer 要 155.0.8059.84)→ 直接启动失败。
  * 所以这里兜底:在 puppeteer 缓存目录里扫一个真实存在的可执行文件。
  */
-function resolveExecutablePath() {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
-  try {
-    // puppeteer 各版本返回的可能是 string 也可能是 URL，统一成字符串再喂给 fs
-    const p = puppeteer.executablePath();
-    const asPath = typeof p === 'string' ? p : (p && p.filePath) ? p.filePath : '';
-    if (asPath && fs.existsSync(asPath)) return asPath;
-  } catch (_) { /* 继续找 */ }
-  const roots = [
-    path.join(process.env.HOME || '', '.cache', 'puppeteer'),
-    path.join(process.env.HOME || '', 'Library', 'Caches', 'puppeteer'),
-  ];
-  const names = [
-    'Google Chrome for Testing',
-    'chrome-headless-shell',
-    'Chromium',
-  ];
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    for (const dir of fs.readdirSync(root)) {
-      if (!dir.startsWith('chrome')) continue;
-      const base = path.join(root, dir);
-      const stack = [base];
-      while (stack.length) {
-        const cur = stack.pop();
-        let entries = [];
-        try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch (_) { continue; }
-        for (const e of entries) {
-          const full = path.join(cur, e.name);
-          if (e.isDirectory()) stack.push(full);
-          else if (names.includes(e.name) && fs.statSync(full).size > 0) return full;
-        }
-      }
-    }
-  }
-  return undefined;
-}
-
+const { resolveExecutablePath } = require('../chrome-path.cjs');
 /** 读当前页面的步骤数与可见文案 */
 async function probe(page) {
   return page.evaluate(() => {
