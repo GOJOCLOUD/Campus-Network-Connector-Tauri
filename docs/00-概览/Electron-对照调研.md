@@ -90,7 +90,7 @@ Electron 的卡片没有 `overflow-hidden`，`min-height: auto` 天然就压不�
 | --- | --- | --- | --- |
 | **关窗口** | macOS 不退出，进程常驻（Safari 修复是常驻能力，关掉就等于把功能关了） | 走 Tauri 默认：**窗口一关进程就退** → Safari 修复与 keepalive 一起消失 | 拦截 `CloseRequested`：macOS 隐藏窗口、进程常驻；Windows 仍按 Electron 口径退出 |
 | **Dock 点图标** | `activate` 时没有窗口就重建 | 无 | `RunEvent::Reopen` → 重新显示窗口 |
-| **全局快捷键** | ⌃⇧A 默认执行、⌃⇧D 读剪贴板直入（**仅 macOS**） | **没有** | 引入 `tauri-plugin-global-shortcut`，两个键都按 Electron 口径实现（走后端，界面没打开也能用） |
+| **全局快捷键** | ⌃S 默认执行、⌃D 读剪贴板直入（**两个平台都有**） | **没有** | 引入 `tauri-plugin-global-shortcut`，两个键都按 Electron 口径实现（走后端，界面没打开也能用） |
 | **单实例** | `requestSingleInstanceLock` + 二次启动叫回窗口 | **没有**（能起两份 → 两个轮询线程、两个事件 tap） | 引入 `tauri-plugin-single-instance` |
 | **应用菜单** | 系统默认菜单（⌘Q / ⌘C / ⌘V / ⌘M） | **没有菜单**（加上"关窗口变成隐藏"之后，用户**没法退出**） | 用 Tauri 内置 menu 补回 macOS 默认菜单 |
 | **置顶层级** | `setAlwaysOnTop(true, 'screen-saver')`（level 1000） | 只有布尔量（floating，level 3）→ 全屏 App 会盖住面板 | 直接把 NSWindow 的 level 设成 1000 |

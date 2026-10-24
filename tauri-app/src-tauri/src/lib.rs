@@ -37,7 +37,7 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "level": native_window_level(&app),
                 }),
             );
-            // 全局快捷键:注册成功没有(Electron 版有 ⌃⇧A / ⌃⇧D 两个)
+            // 全局快捷键:注册成功没有(Electron 版有 ⌃S / ⌃D 两个)
             // macOS 是自己监听事件(见 native::hotkey),那边还有 tap 的状态;
             // 其它平台是系统的全局热键。
             #[cfg(target_os = "macos")]
@@ -470,8 +470,9 @@ pub fn run() {
                         eprintln!("[shortcut] 默认执行失败: {}", e);
                     }
                 } else if id == shortcut_id(SHORTCUT_PASTE) {
-                    // 剪贴板直输要切输入源,只有 macOS 有这套打法
-                    // (Windows 直接送 Unicode 字符,不需要这个快捷键 —— 与 Electron 版一致)
+                    // 剪贴板直输:两个平台**同构**(读剪贴板 → 逐字键入),
+                    // 只有「切输入源」那一步是 macOS 专属
+                    // (Windows 靠 `send_text` 直接送 Unicode 字符,不需要切输入源)。
                     #[cfg(target_os = "macos")]
                     if let Err(e) = commands::shortcuts::trigger_pinyin_from_clipboard(app) {
                         eprintln!("[shortcut] 剪贴板直输失败: {}", e);
@@ -764,10 +765,10 @@ mod shortcut_tests {
     use super::*;
     use tauri_plugin_global_shortcut::Modifiers;
 
-    /// 快捷键必须与 Electron 版**同口径**:⌃⇧A / ⌃⇧D(Control),不是 ⌘⇧(Command)。
+    /// 快捷键必须与 Electron 版**同口径**:⌃S / ⌃D(Control),不是 ⌘(Command)。
     ///
     /// 这条写死过:写成了 `CmdOrControl+Shift+D`,在 macOS 上被解析成 ⌘,
-    /// 用户按 ⌃⇧D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
+    /// 用户按(当时的)⌃⇧D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
     #[test]
     fn 全局快捷键是Control不是Command() {
         for key in [SHORTCUT_DEFAULT_EXECUTE, SHORTCUT_PASTE] {
