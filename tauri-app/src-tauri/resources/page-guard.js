@@ -1,11 +1,12 @@
 (() => {
   // packages/browser-adapters/shared/src/page-guard.ts
-  var GUARD_VERSION = 6;
+  var GUARD_VERSION = 10;
   var API = "__copyRepairGuard";
   function log(state, event, data) {
     state.log.push({ at: Date.now(), event, data });
     if (state.log.length > 200) state.log.splice(0, state.log.length - 200);
   }
+  var lastPendingSig = null;
   function splitFamilies(fontFamily) {
     const out = [];
     let current = "";
@@ -112,14 +113,79 @@
   }
   function fontFingerprint(font) {
     if (!font) return "nofont";
+    return font.kind + hashString(font.kind + ":" + font.value);
+  }
+  function hashString(input) {
     let hash = 2166136261;
-    const source = font.kind + ":" + font.value;
-    const step = Math.max(1, Math.floor(source.length / 512));
-    for (let i = 0; i < source.length; i += step) {
-      hash ^= source.charCodeAt(i);
+    for (let i = 0; i < input.length; i += 1) {
+      hash ^= input.charCodeAt(i);
       hash = Math.imul(hash, 16777619) >>> 0;
     }
-    return font.kind + hash.toString(36);
+    return hash.toString(36);
+  }
+  function fontFaceSignature() {
+    const parts = [];
+    try {
+      const sheets = Array.from(document.styleSheets);
+      for (const sheet of sheets) {
+        let rules = null;
+        try {
+          rules = sheet.cssRules;
+        } catch (_) {
+          continue;
+        }
+        if (!rules) continue;
+        for (const rule of Array.from(rules)) {
+          if (rule.type !== 5) continue;
+          const style = rule.style;
+          if (!style) continue;
+          parts.push(
+            normalizeFamily(style.getPropertyValue("font-family") || "") + "|" + (style.getPropertyValue("font-weight") || "").trim().toLowerCase() + "|" + (style.getPropertyValue("font-style") || "").trim().toLowerCase() + "|" + hashString(style.getPropertyValue("src") || "")
+          );
+        }
+      }
+    } catch (_) {
+    }
+    parts.sort();
+    return parts.join(";");
+  }
+  function shouldReportScope(state, scopeKey) {
+    if (state.deliveredAt && state.deliveredAt[scopeKey]) return false;
+    return true;
+  }
+  function stageAndReport(state, groups, kind) {
+    const unique = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const g of groups) {
+      if (!g || seen.has(g.scopeKey)) continue;
+      seen.add(g.scopeKey);
+      unique.push(g);
+    }
+    const mappable = unique.filter((g) => g.font);
+    const toReport = mappable.filter((g) => shouldReportScope(state, g.scopeKey));
+    if (toReport.length === 0) return "same";
+    state.pending = { groups: toReport };
+    const now = Date.now();
+    const keep = /* @__PURE__ */ new Map();
+    for (const g of state.reportedGroups) keep.set(g.scopeKey, g);
+    for (const g of toReport) {
+      state.reportedAt[g.scopeKey] = now;
+      keep.set(g.scopeKey, g);
+    }
+    state.reportedGroups = [...keep.values()].slice(-12);
+    const sig = `${kind}|${toReport.map((g) => g.scopeKey).join(",")}`;
+    if (sig !== lastPendingSig) {
+      lastPendingSig = sig;
+      log(state, "pending", {
+        kind,
+        groups: toReport.length,
+        chars: toReport.reduce((n, g) => n + g.chars.length, 0),
+        fonts: toReport.map((g) => g.font ? g.font.kind : "none"),
+        prefetch: toReport.filter((g) => g.prefetch).length
+      });
+    }
+    reportToTop(state, "pending", { groups: toReport });
+    return "new";
   }
   function collectPrefetchScopes() {
     const groups = [];
@@ -338,13 +404,19 @@
     } catch (_) {
     }
     const collected = collectSelection();
-    const prefetch = collectPrefetchScopes();
+    const sig = fontFaceSignature();
+    const fontsChanged = sig !== state.fontSig;
+    state.fontSig = sig;
+    const needScan = fontsChanged || state.domDirty;
+    const prefetch = needScan ? collectPrefetchScopes() : [];
+    if (needScan) {
+      state.pageScopes = prefetch.map((g) => g.scopeKey);
+      state.domDirty = false;
+    }
     if (!collected) {
-      if (prefetch.length === 0) return "none";
-      state.pending = { groups: prefetch };
-      log(state, "prefetch", { groups: prefetch.length });
-      reportToTop(state, "pending", { groups: prefetch });
-      return "new";
+      const candidates = prefetch.concat(state.reportedGroups);
+      if (candidates.length === 0) return "none";
+      return stageAndReport(state, candidates, "prefetch");
     }
     state.lastSelectionText = collected.text;
     const groups = /* @__PURE__ */ new Map();
@@ -380,10 +452,22 @@
         if (!charToScope.has(char)) charToScope.set(char, scopeKey);
       }
     }
+    for (const g of prefetch) {
+      if (activeScopes.has(g.scopeKey)) continue;
+      activeScopes.add(g.scopeKey);
+      pendingGroups.push(g);
+    }
+    for (const g of state.reportedGroups) {
+      if (activeScopes.has(g.scopeKey)) continue;
+      activeScopes.add(g.scopeKey);
+      pendingGroups.push(g);
+    }
+    const aliveScopes = new Set(activeScopes);
+    for (const s of state.pageScopes) aliveScopes.add(s);
     const currentByBase = /* @__PURE__ */ new Map();
-    for (const scope of activeScopes) currentByBase.set(scope.split("#")[0], scope);
+    for (const scope of aliveScopes) currentByBase.set(scope.split("#")[0], scope);
     for (const key of Object.keys(state.mappings)) {
-      if (activeScopes.has(key)) continue;
+      if (aliveScopes.has(key)) continue;
       const current = currentByBase.get(key.split("#")[0]);
       if (current && current !== key) delete state.mappings[key];
     }
@@ -395,24 +479,25 @@
     for (const [char, scope] of charToScope) {
       if (!state.charScopes[char]) state.charScopes[char] = scope;
     }
-    for (const g of prefetch) {
-      if (activeScopes.has(g.scopeKey)) continue;
-      activeScopes.add(g.scopeKey);
-      pendingGroups.push(g);
-    }
     if (pendingGroups.length === 0) return "none";
-    state.pending = { groups: pendingGroups };
-    log(state, "pending", {
-      groups: pendingGroups.length,
-      chars: pendingGroups.reduce((n, g) => n + g.chars.length, 0),
-      fonts: pendingGroups.map((g) => g.font ? g.font.kind : "none"),
-      prefetch: pendingGroups.filter((g) => g.prefetch).length
-    });
-    reportToTop(state, "pending", { groups: pendingGroups });
-    return "new";
+    return stageAndReport(state, pendingGroups, "selection");
+  }
+  function migrateState(old) {
+    const next = old;
+    next.version = GUARD_VERSION;
+    if (!next.mappings || typeof next.mappings !== "object") next.mappings = {};
+    if (!next.charScopes || typeof next.charScopes !== "object") next.charScopes = {};
+    if (!Array.isArray(next.pageScopes)) next.pageScopes = [];
+    if (!Array.isArray(next.reportedGroups)) next.reportedGroups = [];
+    if (!next.reportedAt || typeof next.reportedAt !== "object") next.reportedAt = {};
+    next.deliveredAt = {};
+    next.fontSig = "";
+    next.domDirty = true;
+    return next;
   }
   function install() {
     const existing = window[API];
+    let state;
     if (existing) {
       if (existing.version === GUARD_VERSION) {
         log(existing, "reinjected-skipped");
@@ -423,24 +508,34 @@
       } catch (_) {
       }
       existing.log.push({ at: Date.now(), event: "upgraded" });
+      state = migrateState(existing);
+    } else {
+      state = {
+        version: GUARD_VERSION,
+        installedAt: Date.now(),
+        pending: null,
+        mappings: {},
+        charScopes: {},
+        deliveredAt: {},
+        log: [],
+        repairs: 0,
+        copyEvents: 0,
+        lastSelectionText: "",
+        lastCollectedText: "",
+        lastCollectedScope: "",
+        // 初次为 ''：第一次采集时签名必然不同 → 装好就预热一次 ✓
+        fontSig: "",
+        // 装好时先按"内容变了"处理一次 → 第一次采集就会全量扫一遍。
+        domDirty: true,
+        pageScopes: [],
+        reportedGroups: [],
+        reportedAt: {},
+        disabled: false,
+        guardActive: false,
+        intentText: null,
+        internalCall: false
+      };
     }
-    const state = {
-      version: GUARD_VERSION,
-      installedAt: Date.now(),
-      pending: null,
-      mappings: {},
-      charScopes: {},
-      log: [],
-      repairs: 0,
-      copyEvents: 0,
-      lastSelectionText: "",
-      lastCollectedText: "",
-      lastCollectedScope: "",
-      disabled: false,
-      guardActive: false,
-      intentText: null,
-      internalCall: false
-    };
     window[API] = state;
     log(state, "installed");
     const onSelectionChange = () => {
@@ -451,6 +546,15 @@
       }
     };
     document.addEventListener("selectionchange", onSelectionChange, true);
+    let domObserver = null;
+    try {
+      domObserver = new MutationObserver(() => {
+        state.domDirty = true;
+      });
+      domObserver.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (_) {
+      domObserver = null;
+    }
     const restorePrototypes = installPrototypeGuards(state);
     const onCopy = (event) => {
       if (state.disabled) return;
@@ -501,6 +605,10 @@
     state.uninstall = () => {
       document.removeEventListener("selectionchange", onSelectionChange, true);
       window.removeEventListener("copy", onCopy, true);
+      try {
+        domObserver?.disconnect();
+      } catch (_) {
+      }
       try {
         restorePrototypes();
       } catch (_) {
@@ -557,6 +665,7 @@
       if (!state) return "NO-GUARD";
       state.disabled = true;
       state.mappings = {};
+      state.deliveredAt = {};
       state.pending = null;
       log(state, "disabled");
       return "OK";
@@ -565,12 +674,23 @@
       const state = window[API];
       if (!state) return "NO-GUARD";
       state.mappings[scopeKey] = { ...state.mappings[scopeKey] || {}, ...mapping || {} };
+      state.deliveredAt[scopeKey] = Date.now();
       return "OK";
     };
     window.__copyRepairCollect = () => {
       const state = window[API];
       if (!state) return "none";
       return collectAndStage(state);
+    };
+    window.__copyRepairResync = () => {
+      const state = window[API];
+      if (!state) return "NO-GUARD";
+      state.deliveredAt = {};
+      state.reportedAt = {};
+      state.pending = null;
+      state.fontSig = "";
+      log(state, "resync");
+      return "OK";
     };
     installPageGuard();
   }

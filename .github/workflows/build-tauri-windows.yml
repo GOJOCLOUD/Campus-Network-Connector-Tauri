@@ -30,15 +30,6 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Rust 单元测试放在**打包之前**:跑不过就不发包。
-      # 这些测试盯的是"链路会不会又断一次"(守卫上报的字段名、注入脚本的字符串
-      # 字面量、混淆字体能不能整份还原)—— 之前 Rust 侧一个测试都没有,
-      # Safari 修复整条链断掉时没人发现(2026-10-22 那次就是)。
-      # 必须在 "Build frontend" 之后跑:tauri 的构建脚本会检查 frontendDist 在不在。
-      - name: Rust unit tests
-        working-directory: tauri-app/src-tauri
-        run: cargo test --lib
-
       # 硬门禁:frame-bridge 的回归测试(跑不过就不发包)。
       # 盯的是"站点换掉嵌套 iframe 之后,映射还能不能送到新那层"——
       # 2026-10-23 真机故障就是这个:frame 名单过期 → 题目那层一份映射都收不到
@@ -48,10 +39,55 @@ jobs:
       - name: frame-bridge regression test
         run: node --test tools/verify/verify-frame-bridge.cjs
 
+      # 硬门禁:页面守卫的回归测试(跑不过就不发包)。
+      # 盯的是"换题之后新作用域会不会被发现、映射会不会真的到页面上":
+      # 2026-10-23 末那次真机故障(换题后第 1 次复制成功、第 2 次复制出密文)
+      # 就是守卫的三处根因 —— 详见 ADR-0017。
+      # 同一套用例跑两遍:**入库产物**(resources/page-guard.js,真正嵌进 App 的那份)
+      # 与**源码现编**(真身)—— 源码改了而产物忘了同步,会被"产物那半"当场抓住。
+      - name: page-guard regression test
+        run: node --test tools/verify/verify-page-guard.cjs
+
+      # 硬门禁:界面层的回归(跑不过就不发包)。
+      # - 换页时内容区**底下**那条横向滚动条不许再出现
+      #   (用户反馈「下面有个滑条在滑动」),画面横滑的动画不许丢;
+      # - 录制的**单条删除**,以及「点自己界面上的按钮不算一次点击」的契约
+      #   (开始录制不再由前端传那张会过期的矩形)。
+      # 这两条要读**构建出来的 dist/**(真正装进 App 的那份前端),
+      # 所以必须放在 "Build frontend" 之后。
+      #
+      # ⚠️ 找 Chrome 的方式统一走 tools/chrome-path.cjs ——
+      # Windows 上没有 $HOME,各版本自己拼路径会拼成相对路径,必然找不到浏览器
+      # (Electron 线踩过一次:门禁本身没毛病,是它找不到 Chrome)。
+      - name: UI regression test
+        run: node --test tools/verify/verify-panel-transition.cjs tools/verify/verify-recording-ui.cjs
+
+      # Rust 单元测试放在**打包之前**:跑不过就不发包。
+      # 这些测试盯的是"链路会不会又断一次"(守卫上报的字段名、注入脚本的字符串
+      # 字面量、混淆字体能不能整份还原)—— 之前 Rust 侧一个测试都没有,
+      # Safari 修复整条链断掉时没人发现(2026-10-22 那次就是)。
+      # 必须在 "Build frontend" 之后跑:tauri 的构建脚本会检查 frontendDist 在不在。
+      - name: Rust unit tests
+        working-directory: tauri-app/src-tauri
+        run: cargo test --lib
+
       - name: Build Tauri NSIS installer
         run: |
           cd tauri-app
           npx @tauri-apps/cli@2 build --bundles nsis
+
+      # 硬门禁:安装包的**运行时产物**必须在(跑不过就不发包)。
+      #
+      # 盯的是「装上之后功能是坏的」那类问题:
+      #   - NSIS 安装包与主程序都在;
+      #   - 字形参考库(glyph-db-48.crdb.gz)真的被带进了产物目录,
+      #     而且与仓库里那份**逐字节相同**(被截断/漏拷在这里当场暴露);
+      #   - 前端产物完整(index.html 引用的资源都在)。
+      #
+      # Tauri 侧不涉及 electron-builder 的 build.files 白名单(那是 Electron 线的老坑),
+      # 但「运行时产物齐不齐」这件事同样要有人盯 —— 没有人盯就等于没有。
+      - name: Verify packaged runtime artifacts
+        run: node tools/verify/verify-package-tauri-win.cjs
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
