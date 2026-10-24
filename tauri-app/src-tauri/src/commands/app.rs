@@ -685,14 +685,46 @@ pub fn set_feature_enabled_state(
 
 // ── 原生模块状态 ─────────────────────────────────────
 
+/// 原生输入模块在**哪些平台**是实装的。
+///
+/// - macOS:CoreGraphics(CGEventTap 录制 / 合成输入)
+/// - Windows:Win32(SendInput 合成输入 / 剪贴板)
+///
+/// 别的平台只有占位实现 ⇒ 原生能力不可用。
+pub const NATIVE_MODULE_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
 #[tauri::command]
 pub fn get_native_status() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
-        "ok": cfg!(target_os = "macos"),
+        // ⚠️ 这个字段的口径必须与 Electron 版**完全一样**:
+        // `ok` = **原生模块能不能用**,不是「是不是 macOS」。
+        //
+        // 这里以前写的是 `cfg!(target_os = "macos")` —— 在 Windows 上**恒为 false**,
+        // 于是界面上那条红底白字「模拟输入相关功能不可用:原生模块加载失败,
+        // 请重新安装最新版安装包」**必然出现**;而实际上 Windows 的原生模块
+        // 加载得好好的,「模拟输入」是能用的(用户 2026-10-24 反馈:
+        // 「本来就没有这个功能 干嘛红底白字提醒」)。
+        //
+        // Electron 版那边是 `ok: !!native` —— **同名不同义**,这才是根因。
+        //
+        // 这里的判据:命令能调到 ⇒ 原生模块编译进来了、注册成功了
+        // (真加载失败的话这条命令压根不会被注册,前端 invoke 会抛错,
+        //  拿到的不是 `ok:false` 而是异常)。
+        // 所以按「这个平台有没有原生模块」给,和 Electron 同口径。
+        "ok": NATIVE_MODULE_SUPPORTED,
+        // 出问题时才有内容(Electron 版是 `nativeModuleError`,空串 = 没问题)。
+        "error": if NATIVE_MODULE_SUPPORTED {
+            String::new()
+        } else {
+            "当前平台没有原生输入模块".to_string()
+        },
         "platform": std::env::consts::OS,
         // 发合成点击/按键需要 macOS 的「辅助功能」权限;
         // 没有的话事件会被系统静默丢弃(命令返回成功,但什么都没发生)。
         "accessibilityTrusted": super::native::accessibility_trusted(),
+        // 窗口贴合内容时**实际**改过几次原生窗口尺寸(诊断用)。
+        // 改一次 = 一次 WebView 整页重排;这个数一多就是肉眼可见的卡顿。
+        "fitResizes": crate::FIT_RESIZE_COUNT.load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
@@ -912,3 +944,42 @@ mod migrate_tests {
     }
 }
 
+
+/// `get_native_status` 的 `ok` 字段口径:**原生模块能不能用**。
+///
+/// 这条是被一条真 bug 逼出来的:它以前写的是 `cfg!(target_os = "macos")`,
+/// 在 Windows 上**恒为 false** ⇒ 界面上那条红底白字「原生模块加载失败」
+/// **必然出现** —— 而 Windows 的原生模块其实加载得好好的,「模拟输入」是能用的。
+/// Electron 版那边是 `ok: !!native`:两个字段**同名不同义**,这才是根因。
+#[cfg(test)]
+mod native_status_tests {
+    use super::*;
+
+    #[test]
+    fn ok_表示原生模块能不能用而不是是不是macos() {
+        let st = get_native_status().unwrap();
+        assert_eq!(
+            st["ok"], NATIVE_MODULE_SUPPORTED,
+            "ok 必须等于「本平台有没有原生模块」,不能写死成「是不是 macOS」"
+        );
+        // macOS 与 Windows 都有原生模块 ⇒ 这两个平台上 ok 必须是 true。
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            st["ok"], true,
+            "macOS / Windows 上原生模块是有的,ok 不许是 false"
+        );
+    }
+
+    #[test]
+    fn 有问题时才带错误原因() {
+        let st = get_native_status().unwrap();
+        if st["ok"] == true {
+            assert_eq!(st["error"], "", "没问题的时候不能带错误原因");
+        } else {
+            assert!(
+                !st["error"].as_str().unwrap_or("").is_empty(),
+                "失败时必须写明原因"
+            );
+        }
+    }
+}

@@ -649,10 +649,9 @@ function App() {
         //
         // 最后一步点「完成」会把整个面板**收起**(isCompleted → 高度 0),
         // 收起后还能靠顶上的步骤圈再点回来。
-        // 以前 Windows 少一步、最后一步正是主操作界面「默认执行」——
-        // 那一屏被收起就没法操作了,所以那时候把这个按钮藏了。
-        // 2026-10-24 确认「键盘输入」这一步在 Windows 上也保留之后,
-        // 最后一步不再是主操作界面 ⇒ 按钮照常显示。
+        //
+        // 两个平台的最后一步现在**都是「键盘输入」**
+        // (Windows 撤掉「默认执行」之后也是它)⇒ 两边行为一致,按钮都显示。
         hideCompleteButton={false}
         corner={
           /* macOS 用原生红绿灯(见 main.js 的 titleBarStyle/trafficLightPosition),
@@ -674,9 +673,15 @@ function App() {
           <ActivationPanel {...activationPanelProps} />
         </Step>
 
-        <Step>
-          <DefaultExecutePanel {...defaultExecutePanelProps} />
-        </Step>
+        {/* 「默认执行(回放)」这一步在 **Windows 上不出现**。
+            Windows 线没有录制 ⇒ 没有可回放的源 ⇒ 这一屏是「点了没反应」的死界面。
+            (2026-10-24 用户口径:「本来就没有这个功能」—— 既然没有,界面就不该露出来。)
+            下面的「模拟点击(录制)」同样是 macOS 专属(ADR-0012:Windows 不做录制入口)。 */}
+        {!isWindows && (
+          <Step>
+            <DefaultExecutePanel {...defaultExecutePanelProps} />
+          </Step>
+        )}
 
         {/* 「模拟点击(录制)」这一步是 macOS 专属(按 ADR-0012,Windows 侧不做录制入口)。
             下面的「键盘输入」两边都有 —— Windows 直接送 Unicode 逐字键入。 */}
