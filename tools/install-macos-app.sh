@@ -1,26 +1,34 @@
 #!/bin/bash
-# 安装 / 更新 macOS 版(Tauri),并保证「辅助功能」授权不会因重新打包而失效。
+# 安装 / 更新 macOS 版(Tauri)。
 #
 #   tools/install-macos-app.sh <包路径>
 #     包路径可以是:
 #       - 云端 release 的 zip(https://github.com/GOJOCLOUD/Campus-Network-Connector-Tauri/releases)
 #       - 已经解压好的 .app
 #
-# 为什么要"重签"这一步:
-#   云端 CI 出的包是 **ad-hoc 签名**(TeamIdentifier = not set)。macOS 的系统授权
-#   (辅助功能 / 自动化)是**按代码签名身份**记的 —— ad-hoc 签名的身份跟着二进制
-#   内容变,每出一个新包身份就变,**之前授过的权会直接失效**,要重新勾一次。
-#   这里统一用钥匙串里那张**固定证书**重签,授权就能长期留着。
+# ## 重新安装要重新授权,这是正常的
+#
+# macOS 的系统授权(辅助功能 / 自动化)是**按代码签名身份**记的,身份一变,
+# 之前授过的权就作废。**重新安装 = 重新授权**,这属于正常代价 ——
+# 本脚本**不**为了「让授权留着」搞任何额外机制(不挑固定证书、不追授权状态),
+# 重新勾一次就是了。
+#
+# ## 签名只做一件事:让签名**有效**
+#
+# Tauri 的构建产物只有链接器的 ad-hoc 签名(没有 `_CodeSignature` 资源封印),
+# `codesign --verify` 会报「code has no resources but signature indicates they
+# must be present」—— 那是**无效签名**,Gatekeeper 会判成「应用已损坏」,
+# 比「无法验证开发者」更难绕过。
+# ⇒ 这里用 ad-hoc **整包**签一次,只为了让签名有效,跟授权能不能留住**无关**。
 #
 # 流程(每步都可回滚):
 #   1. 解包(如果是 zip)并核对二进制哈希与源一致 —— 不信退出码
 #   2. 退出正在运行的 App
 #   3. 旧版本移入可恢复回收站(不做永久删除)
-#   4. 新版本就位,用固定身份重签并校验签名
+#   4. 新版本就位,用 ad-hoc 签整包并校验签名
 #   5. 启动,读运行自检 diag.json,把真实状态打出来
 #
 # 环境变量:
-#   SIGN_IDENTITY   指定签名身份(默认自动找钥匙串里可用的代码签名身份)
 #   APP_PATH        安装目标(默认 /Applications/模拟输入-Tauri.app)
 set -euo pipefail
 
@@ -54,27 +62,14 @@ BIN_REL="Contents/MacOS/simuinput-tauri"
 SRC_SHA="$(shasum -a 256 "$APP_SRC/$BIN_REL" | awk '{print $1}')"
 say "[1] 源二进制 sha256 = $SRC_SHA"
 
-# ── 2. 选签名身份 ─────────────────────────────────────────────────
-if [ -z "${SIGN_IDENTITY:-}" ]; then
-  # 优先用钥匙串里"有效的"代码签名身份;不要 Apple Development 这种会过期的临时身份,
-  # 但本机目前只有这一张,先用它,总比 ad-hoc 强。
-  # security find-identity 的行长这样:
-  #   1) BE837299...168B65FD "Apple Development: 8618291894921 (FY2K6ZB64V)"
-  # 名字在引号里,前面还带一段 hash,所以要取最后一对引号之间的内容。
-  SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep -E '^\s+[0-9]+\) [0-9A-F]{40} "' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-fi
-[ -n "${SIGN_IDENTITY:-}" ] || die "钥匙串里没有可用的代码签名身份(设 SIGN_IDENTITY 指定)"
-say "[2] 签名身份 = $SIGN_IDENTITY"
-
-# ── 3. 退出 App + 旧版本移入回收站 ────────────────────────────────
-say "[3] 退出正在运行的 App"
+# ── 2. 退出 App + 旧版本移入回收站 ────────────────────────────────
+say "[2] 退出正在运行的 App"
 osascript -e 'tell application "模拟输入-Tauri" to quit' >/dev/null 2>&1 || true
 pkill -f "$APP_PATH/Contents/MacOS" >/dev/null 2>&1 || true
 sleep 1
 
 if [ -e "$APP_PATH" ]; then
-  say "[3] 旧版本移入可恢复回收站: $APP_PATH"
+  say "[2] 旧版本移入可恢复回收站: $APP_PATH"
   if [ -x "$TRASH" ]; then
     "$TRASH" -- "$APP_PATH"
   else
@@ -84,8 +79,8 @@ if [ -e "$APP_PATH" ]; then
   fi
 fi
 
-# ── 4. 就位 + 重签 ────────────────────────────────────────────────
-say "[4] 安装到 $APP_PATH"
+# ── 3. 就位 + 让签名有效 ──────────────────────────────────────────
+say "[3] 安装到 $APP_PATH"
 ditto "$APP_SRC" "$APP_PATH"
 
 # 哈希核对必须在**签名前**做:codesign 会把签名写进二进制,签完哈希必然变,
@@ -94,15 +89,15 @@ INST_SHA="$(shasum -a 256 "$APP_PATH/$BIN_REL" | awk '{print $1}')"
 [ "$INST_SHA" = "$SRC_SHA" ] || die "装完的二进制和源对不上: $INST_SHA != $SRC_SHA"
 say "    装完二进制 sha256 与源一致: $INST_SHA"
 
-say "[4] 用固定身份重签(这步是授权能长期留着的关键)"
-codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_PATH"
+say "[3] 用 ad-hoc 签整包(只为让签名有效:构建产物只有链接器的 ad-hoc 签名,没有资源封印,Gatekeeper 会判「已损坏」)"
+codesign --force --deep --sign - "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"
 say "    签名校验通过"
 codesign -dv "$APP_PATH" 2>&1 | grep -E "Identifier=|TeamIdentifier=" | sed 's/^/    /'
 say "    (签名会改写二进制,签后哈希与源不同是正常的)"
 
-# ── 5. 启动 + 读运行自检 ──────────────────────────────────────────
-say "[5] 启动 App 并读运行自检"
+# ── 4. 启动 + 读运行自检 ──────────────────────────────────────────
+say "[4] 启动 App 并读运行自检"
 open -a "$APP_PATH"
 sleep 4
 if [ -f "$DIAG" ]; then
@@ -122,7 +117,7 @@ sys.exit(0 if (d.get('native') or {}).get('accessibilityTrusted') else 1)"; then
     say ""
     say "⚠️  还差最后一步(只有你能做):系统设置 → 隐私与安全性 → 辅助功能 →"
     say "    勾选「模拟输入-Tauri」→ 把这个 App 完全退出再重开。"
-    say "    授权会一直留着 —— 因为签名身份是固定的,以后更新包不会掉。"
+    say "    **重新安装 = 重新授权,这是正常的** —— 以后每次换新包,重勾一次就行。"
   fi
 else
   say "    没读到 diag.json(应用可能没起来)"

@@ -97,8 +97,11 @@ Control 按下        ⇒ 只有 blocked == false 时才 armed = true
 
 ### 为什么 Electron 不改成自建 tap
 
-主动 tap(能吞键)**需要「辅助功能」权限**,而 Electron 是 **ad-hoc 签名**,
-拿不到那个权限。`globalShortcut` 由系统替你吞键 ⇒ 既不漏按键、也不需要权限。
+主动 tap(能吞键)**需要「辅助功能」权限**;而 `globalShortcut` 由系统替你吞键
+⇒ 既不漏按键、也不需要权限。
+
+> 2026-10-24 更正:原文写「Electron 是 ad-hoc 签名 ⇒ 拿不到那个权限」。
+> 签名与能不能拿到权限**没有因果关系**;那条说法已随「为保留授权而做的那套机制」一起作废。
 ⇒ Electron 用**系统热键 + 只读监听**的组合。
 
 **ListenOnly 的会话级 tap 不需要辅助功能权限**(只读监听是例外),

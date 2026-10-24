@@ -23,20 +23,19 @@ cd tauri-app && npx @tauri-apps/cli@2 build --bundles app
 cd ../.. && tools/install-macos-app.sh tauri-app/src-tauri/target/release/bundle/macos/模拟输入-Tauri.app
 ```
 
-### 为什么必须重签(别手动跳过这步)
+### 为什么脚本要签一次(跟授权没关系)
 
-macOS 的系统授权(辅助功能 / 自动化)是**按代码签名身份**记的。
-云端 CI 出的包是 **ad-hoc 签名**(TeamIdentifier = not set),身份跟着二进制内容变 ——
-每出一个新包,之前授过的权**直接失效**,得重新勾一次。
+Tauri 的构建产物只有**链接器**的 ad-hoc 签名(没有 `_CodeSignature` 资源封印),
+`codesign --verify` 会报「code has no resources but signature indicates they
+must be present」—— 那是**无效签名**,Gatekeeper 判成「应用已损坏」,
+比「无法验证开发者」更难绕过(右键也开不了)。
 
-`tools/install-macos-app.sh` 会用钥匙串里那张**固定证书**重签:
+`tools/install-macos-app.sh` 用 ad-hoc **整包**签一次,只为了让签名**有效**。
 
-```
-Identifier=com.gojocloud.campus-network-connector.tauri
-TeamIdentifier=769LN7AY28
-```
-
-这样授权**跟着签名身份走,以后更新包不会掉**。换证书:设 `SIGN_IDENTITY=...` 环境变量。
+> ⚠️ 换新版本后**要重新授权一次**,这是**正常代价** ——
+> macOS 的授权按代码签名身份记,身份一变就作废。
+> 曾经为「让授权跨版本留住」去挑一张固定证书,那套机制已废除
+> (2026-10-24 用户口径:不值得为正常代价做额外机制)。
 
 > 手动装的话,务必自己补上这一步:
 > `codesign --force --deep --sign "<身份>" /Applications/模拟输入-Tauri.app`
@@ -66,8 +65,8 @@ Tauri 版在**第 4 页(键盘输入)右上角**有一个小问号,标着「辅�
 3. 打开它的开关
 4. **完全退出并重开本软件**(macOS 的授权要重启进程才生效)
 
-> 授权**只认签名身份**,所以务必用 `tools/install-macos-app.sh` 装(它会重签成固定身份)。
-> 用 ad-hoc 签名的包授权,下次更新就白授权了。
+> 换新版本后**要重新授权一次**,这是**正常代价**(授权按签名身份记,身份一变就作废)。
+> 不为它做额外机制 —— 重新勾一次就是了。
 
 ### 授予「自动化」(Safari 复制修复用)
 
@@ -122,10 +121,10 @@ cat "$D/diag.json"
 
 ### 授权突然没了(装完新包之后)
 
-macOS 的授权**认签名身份**:ad-hoc 签名的包每出一个新构建身份就变,授权会全部掉。
+macOS 的授权**认签名身份**:换新构建身份就变,授权会全部掉。
+**这是正常代价**,不是坏了。
 
-用 `tools/install-macos-app.sh` 重装(它会用固定证书重签),然后**辅助功能只勾一次**,
-以后更新包不会再掉。
+重新到「辅助功能」里勾一次,然后完全退出并重开本软件即可。
 
 ### 想知道"到底生效没有"
 
