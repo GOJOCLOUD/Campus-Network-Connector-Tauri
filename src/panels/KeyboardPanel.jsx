@@ -7,6 +7,7 @@ export default function KeyboardPanel({
   name,
   onNameChange,
   onPinyinInput,
+  onPasteFromClipboard,
   onClearText,
   pinyinCountdown,
   message,
@@ -68,6 +69,13 @@ export default function KeyboardPanel({
       <div className="flex items-center gap-2 flex-wrap">
         <button type="button" onClick={() => onPinyinInput(name || '')}
           className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-1.5 px-4 rounded-lg transition duration-300 shadow-md active:scale-95 transform">开始输入（3s 后键入）</button>
+        {/* 「读剪贴板并键入」原来挂在**全局快捷键 ⌃D** 上。
+            Windows 线不注册任何全局快捷键(⌃D 是 Windows 的系统默认键,
+            抢过来会让用户自己开的软件被直接关掉)⇒ 这个能力搬到这里,
+            读剪贴板走原生通道(WebView2 的 navigator.clipboard 可能因焦点/权限失败)。 */}
+        <button type="button" onClick={() => onPasteFromClipboard?.()}
+          title="读系统剪贴板里的文本，逐字键入到当前光标位置"
+          className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-1.5 px-4 rounded-lg transition duration-300 shadow-md active:scale-95 transform">从剪贴板读入并键入</button>
         <button type="button" onClick={onClearText}
           className="bg-gray-200 hover:bg-gray-300 text-gray-600 font-medium py-1.5 px-4 rounded-lg transition duration-300 active:scale-95 transform">清空</button>
       </div>

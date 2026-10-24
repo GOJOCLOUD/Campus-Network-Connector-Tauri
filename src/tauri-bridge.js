@@ -322,6 +322,9 @@ function installTauriBridge() {
     quit: () => invoke('window_quit'),
     minimize: () => invoke('window_minimize'),
     maximize: () => invoke('window_maximize'),
+    // 关窗口但**进程留着**(Windows 线的「后台挂着」)。
+    // 唤回:托盘图标 / 再运行一次程序。彻底退出:托盘菜单的「退出程序」。
+    hide: () => invoke('window_hide'),
     // 窗口贴合内容(见上面 fitWindow 的说明)
     fitWindowToContent: () => fitWindow(),
     // 打开「系统设置 → 隐私与安全性 → 辅助功能」

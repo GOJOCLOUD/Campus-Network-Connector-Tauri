@@ -49,10 +49,18 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
             let tap_state = nativecmd::hotkey_win::diagnostics();
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let tap_state = serde_json::Value::Null;
+            // Windows 线**不注册任何全局键**(2026-10-24 用户口径):
+            // ⌃D / ⌃S 都是 Windows 的系统默认键,抢过来会关掉用户自己开的软件。
+            // 这一栏明确写 false —— 免得看到 `registered: []` 以为是「注册失败」。
+            #[cfg(target_os = "windows")]
+            let global_shortcuts_enabled = false;
+            #[cfg(not(target_os = "windows"))]
+            let global_shortcuts_enabled = true;
             obj.insert(
                 "shortcuts".to_string(),
                 serde_json::json!({
                     "registered": registered_shortcuts(),
+                    "globalShortcutsEnabled": global_shortcuts_enabled,
                     "defaultExecute": SHORTCUT_DEFAULT_EXECUTE,
                     "paste": SHORTCUT_PASTE,
                     "tap": tap_state,
@@ -272,10 +280,31 @@ fn window_minimize(app: tauri::AppHandle) {
     }
 }
 
+/// 最大化 / 还原(**再点一次就是还原**)。
+///
+/// 与 Electron 版 `window:maximize` 同口径:
+/// `isMaximized() ? unmaximize() : maximize()`。
 #[tauri::command]
 fn window_maximize(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.maximize();
+        if w.is_maximized().unwrap_or(false) {
+            let _ = w.unmaximize();
+        } else {
+            let _ = w.maximize();
+        }
+    }
+}
+
+/// 关窗口,但**进程留着**(Windows 线的「后台挂着」)。
+///
+/// 和 macOS 的红绿灯同口径:窗口只是**藏起来**,进程还在跑,
+/// 常驻能力都还在,托盘图标也还在 ⇒ 还能把窗口叫回来。
+///
+/// 彻底退出走**托盘菜单里的「退出程序」**。
+#[tauri::command]
+fn window_hide(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
     }
 }
 
@@ -308,6 +337,12 @@ fn window_fit_to_content(app: tauri::AppHandle, height: f64) -> Result<(), Strin
         return Err("高度不合法".to_string());
     }
     let w = app.get_webview_window("main").ok_or("找不到主窗口")?;
+    // **最大化时不做贴合**:这时窗口尺寸是系统定的,
+    // 再 set_size 会把最大化状态顶掉(窗口自己缩回原尺寸),
+    // 表现出来就是「点了最大化,窗口又弹回去」。
+    if w.is_maximized().unwrap_or(false) {
+        return Ok(());
+    }
     let scale = w.scale_factor().map_err(|e| e.to_string())?;
     let cur = w.inner_size().map_err(|e| e.to_string())?;
     let cur_logical = cur.height as f64 / scale;
@@ -441,19 +476,124 @@ fn keepalive_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, S
     }
 }
 
+/// 把主窗口叫回来(托盘左键 / 托盘菜单「显示窗口」/ 单实例回调共用)。
+///
+/// `unminimize()` 必须在 `show()` **前面**:窗口是最小化状态时,
+/// 光 `show()` 不会把它从任务栏的最小化态里拉出来。
+pub fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Windows 线的**托盘图标**:窗口藏起来之后,靠它把窗口叫回来 / 彻底退出。
+///
+/// ## 为什么必须有它
+///
+/// 2026-10-24 用户口径:「点叉他就直接完全退出了,这个他要在后台挂着,
+/// 功能依然生效」。⇒ 窗口的关闭被改成**只隐藏**。
+/// 但 Windows 上窗口一藏,**任务栏就没有图标了** —— 没有托盘的话,
+/// 这个 app 就**再也找不回来**(只剩"再运行一次程序"那条路)。
+///
+/// 托盘菜单只有两项:
+/// - 「显示窗口」:把藏起来的窗口叫回来(左键点托盘图标也是这个效果);
+/// - 「退出程序」:**彻底退出**进程。
+///
+/// ## 建不出来也不能拖垮 app
+///
+/// 托盘只是"找回窗口"的**便利**,不是"后台活着"的必要条件:
+/// 窗口只是被隐藏,进程照样活着,常驻能力都还在。
+/// 所以任何一步出错都只是**不装托盘**,并把原因写进日志。
+#[cfg(target_os = "windows")]
+fn setup_tray(app: &tauri::AppHandle) {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show_item = match MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[tray] 建菜单项失败(不装托盘): {}", e);
+            return;
+        }
+    };
+    let quit_item = match MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[tray] 建菜单项失败(不装托盘): {}", e);
+            return;
+        }
+    };
+    let menu = match Menu::with_items(app, &[&show_item, &quit_item]) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[tray] 建菜单失败(不装托盘): {}", e);
+            return;
+        }
+    };
+    let icon = match app.default_window_icon() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!("[tray] 没有默认窗口图标(不装托盘)");
+            return;
+        }
+    };
+
+    let built = TrayIconBuilder::new()
+        .icon(icon)
+        .tooltip("模拟输入")
+        // 左键**不**弹菜单:左键直接把窗口叫回来(用户点它就是想"看到窗口")。
+        // 右键仍然弹菜单(显示窗口 / 退出程序)。
+        .show_menu_on_left_click(false)
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "quit" => {
+                // 托盘菜单的「退出程序」= **彻底退出**。
+                // 窗口的 CloseRequested 被拦着(只隐藏、不退出),
+                // 所以这条菜单是**唯一**的彻底退出路径。
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app);
+
+    if let Err(e) = built {
+        eprintln!("[tray] 托盘图标创建失败(窗口照样能关,但没有托盘图标): {}", e);
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         // 单实例:第二次启动不新开一份,而是把已有窗口叫回来。
         // (Electron 版 main.js 里 requestSingleInstanceLock + second-instance 同口径。
         //  没有它就能同时起两份 → 两个轮询线程、两个事件 tap,互相打架。)
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            // 第二次启动 = 把**已有的**窗口叫回来(而不是新开一份)。
+            show_main_window(app);
         }))
-        // 全局快捷键:⌃S 默认执行 / ⌃D 剪贴板直输。
-        // 快捷键走的是**后端**这条路 —— 界面没打开时也要能用。
+        // 全局快捷键插件。
+        //
+        // ⚠️ **Windows 线一个全局键都不注册**(2026-10-24 用户口径,见
+        //    `register_global_shortcuts` 的文档):⌃D / ⌃S 都是 Windows 的
+        //    **系统默认键**,抢过来会让用户在自己常用的软件里按 ⌃D 就把那个
+        //    软件/系统对话框关掉(用户原话:「不然他直接把软件退出了」)。
+        //    ⇒ 这里注册的是**空列表**,下面的 handler 在 Windows 上**永远不会触发**;
+        //    留着它是给将来真要加全局键时用的(注册逻辑还在原处)。
+        //
+        // macOS 走的是 `native::hotkey` 自己监听事件(匹配更宽松、能吃掉按键),
+        // 不用这个插件。
         .plugin(tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|app, shortcut, event| {
                 if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
@@ -498,6 +638,7 @@ pub fn run() {
             window_quit,
             window_minimize,
             window_maximize,
+            window_hide,
             window_fit_to_content,
             open_accessibility_settings,
             appcmd::get_activation_snapshot,
@@ -567,6 +708,9 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }
+            // Windows:装**托盘图标** —— 窗口被隐藏之后靠它叫回来 / 彻底退出。
+            #[cfg(target_os = "windows")]
+            setup_tray(app.handle());
             // 录制用的「排除矩形」必须**跟着窗口走**。
             //
             // 「点自己界面上的按钮不算一次点击」靠它实现:落在自己窗口范围内的
@@ -606,15 +750,24 @@ pub fn run() {
             }
             #[cfg(target_os = "windows")]
             {
-                // Control 的按下/松开观察源 —— latch 靠它才解得开。
-                // 起不来就**如实降级**(latch 不生效,并在诊断里写明),
-                // 绝不假装 latch 在工作。
-                match nativecmd::hotkey_win::start() {
-                    Ok(_) => nativecmd::hotkey_win::set_expected(true),
-                    Err(e) => eprintln!(
-                        "[shortcut] Control 观察线程启动失败,latch 降级为不生效: {}",
-                        e
-                    ),
+                // Windows 线**不注册任何全局快捷键**(2026-10-24 用户口径)⇒
+                // 不需要 latch ⇒ 也就不需要 Control 的按下/松开观察器
+                // (那个线程每 20ms 轮询一次 `GetAsyncKeyState(VK_CONTROL)`,
+                //  白挂着只是白占 CPU —— 用户同期反馈「Windows 上有点偏卡顿」)。
+                //
+                // 开关写死为 false:将来真要加全局键时,把它改成 true,
+                // 并把键加进 `global_shortcut_keys()` 就行。
+                // (Rust 单测 `Windows线不注册任何全局快捷键` 守着这两条。)
+                if HOTKEY_OBSERVER_ENABLED {
+                    match nativecmd::hotkey_win::start() {
+                        Ok(_) => nativecmd::hotkey_win::set_expected(true),
+                        Err(e) => eprintln!(
+                            "[shortcut] Control 观察线程启动失败,latch 降级为不生效: {}",
+                            e
+                        ),
+                    }
+                } else {
+                    nativecmd::hotkey_win::set_expected(false);
                 }
             }
             #[cfg(not(target_os = "macos"))]
@@ -635,16 +788,14 @@ pub fn run() {
         // Electron 版 main.js 的 window-all-closed 就是这么处理的(macOS 不退出)。
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                #[cfg(target_os = "macos")]
-                {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    // Windows 线没有常驻能力,关窗口就退出(和 Electron 版一致)
-                    let _ = (window, api);
-                }
+                // **关窗口 ≠ 退出 App** —— macOS 惯例,Windows 线**同口径**
+                // (2026-10-24 用户口径:「点叉他就直接完全退出了,这个他要在后台
+                //  挂着,功能依然生效」)。直接退进程等于把 app 关掉了,不是「收起来」。
+                //
+                // Windows 上窗口一藏,任务栏就没有图标了 ⇒ 靠**托盘图标**把窗口
+                // 叫回来;彻底退出走**托盘菜单的「退出程序」**。
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .build(tauri::generate_context!())
@@ -654,16 +805,51 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
                 if !has_visible_windows {
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
+                    show_main_window(app);
                 }
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
         });
 }
+
+/// Windows 线要注册的**全局快捷键**清单。
+///
+/// ## 这里**刻意是空的**(2026-10-24 用户口径)
+///
+/// - **⌃D 是 Windows 的系统默认键**。抢过来 ⇒ 用户在自己常用的软件里按 ⌃D,
+///   那个软件/系统对话框会**直接被关掉**(用户原话:
+///   「我不能设置为快捷键,不然他直接把软件退出了」)。
+/// - **⌃S 同为系统默认键**(「保存」),而且它驱动的「默认执行(回放)」在 Windows 上
+///   **已经没有界面了**(上一轮按用户口径撤掉:「本来就没有这个功能」)。
+///
+/// Windows 线因此**一个系统全局键都不占**。
+///
+/// 保留这个函数(而不是删掉)是为了:
+/// ① 诊断里 `shortcuts.registered` 明确是空数组,配合 `globalShortcutsEnabled: false`
+///    能一眼看出是「按政策不注册」而不是「注册失败」;
+/// ② 将来真要加全局键时,注册逻辑还在原处。
+///
+/// 这条清单由 `mod shortcut_tests` 里的单测守着:清单里一旦又出现任何
+/// `SHORTCUT_*`,单测立刻转红。
+pub fn global_shortcut_keys() -> Vec<&'static str> {
+    Vec::new()
+}
+
+/// 要不要启动「Control 按下/松开」的观察线程。
+///
+/// 这个线程**只为全局快捷键的 latch 服务**(latch 靠它解得开:
+/// 触发一次之后必须松开 Control 才重新武装)。
+///
+/// Windows 线**不注册任何全局快捷键**(2026-10-24 用户口径)⇒ 没有 latch
+/// ⇒ 这个每 20ms 轮询一次 `GetAsyncKeyState(VK_CONTROL)` 的线程**不该跑**
+/// (白占 CPU;用户同期反馈「Windows 上有点偏卡顿」)。
+///
+/// 写成一个常量(而不是干脆删掉那段代码)是为了:
+/// ① 意图一眼可见,不用去翻调用点;
+/// ② Rust 单测 `Windows线不注册任何全局快捷键` 能直接守着它;
+/// ③ 将来要加全局键时,改成 true 就行。
+pub const HOTKEY_OBSERVER_ENABLED: bool = false;
 
 /// 注册全局快捷键(系统的全局热键 —— 只有非 macOS 平台用)。
 ///
@@ -674,12 +860,11 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let gs = app.global_shortcut();
-    // **两个都要注册**:⌃S 默认执行、⌃D 剪贴板直输。
-    //
-    // 之前 Windows 这边只注册了 ⌃S —— ⌃D 的常量写着 `Control+D`,
-    // 界面上也写着这个快捷键,但系统里**根本没注册** ⇒ 按下去什么都不发生。
-    // 现在两个平台的快捷键是同一对。
-    let keys = vec![SHORTCUT_DEFAULT_EXECUTE, SHORTCUT_PASTE];
+    // 先把**本进程**里可能残留的注册清掉(老版本注册过 ⌃S / ⌃D)。
+    let _ = gs.unregister_all();
+
+    // **刻意为空**:Windows 线不占任何系统全局键(理由见 `global_shortcut_keys`)。
+    let keys = global_shortcut_keys();
 
     let mut ok_list: Vec<String> = Vec::new();
     for key in keys {
@@ -757,5 +942,28 @@ mod shortcut_tests {
                 key
             );
         }
+    }
+
+    /// Windows 线**一个全局键都不占**(2026-10-24 用户口径)。
+    ///
+    /// ⌃D / ⌃S 都是 Windows 的**系统默认键**:抢过来之后,用户在自己常用的
+    /// 软件里按 ⌃D,那个软件/系统对话框会**直接被关掉**
+    /// (用户原话:「我不能设置为快捷键,不然他直接把软件退出了」)。
+    /// ⌃S 同理,而且它驱动的「默认执行(回放)」在 Windows 上已经没有界面了。
+    ///
+    /// 这条断言的作用:防止以后有人"顺手"把某个键加回注册清单。
+    #[test]
+    fn Windows线不注册任何全局快捷键() {
+        let keys = global_shortcut_keys();
+        assert!(
+            keys.is_empty(),
+            "Windows 线不该注册任何全局快捷键,实际清单: {:?}",
+            keys
+        );
+        // 没有全局键 ⇒ 没有 latch ⇒ 那个 20ms 的 Control 轮询也不该跑。
+        assert!(
+            !HOTKEY_OBSERVER_ENABLED,
+            "没有全局快捷键就不该启动 Control 观察线程(它只服务于全局键的 latch)"
+        );
     }
 }

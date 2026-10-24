@@ -192,6 +192,38 @@ function App() {
       .catch(() => { setMessage('请求失败'); setPinyinCountdown(0) })
   }
 
+  // 「从剪贴板读入并键入」—— 这个能力原来挂在**全局快捷键 ⌃D** 上。
+  //
+  // Windows 线**不再注册任何全局快捷键**(2026-10-24 用户口径:⌃D 是 Windows 的
+  // 系统默认键,抢过来会让用户自己开的软件被直接关掉)⇒ 能力搬到界面上,
+  // 不丢功能、也不占系统快捷键。
+  //
+  // 读剪贴板走**原生**通道(`cnc.clipboardReadText()` → Win32 `OpenClipboard` /
+  // Electron `clipboard`):WebView2 里的 `navigator.clipboard.readText()` 有可能
+  // 因为焦点/权限直接失败,原生通道不挑这些。
+  const requestPasteFromClipboard = () => {
+    setMessage('读取剪贴板中...')
+    Promise.resolve(cnc.clipboardReadText?.())
+      .then((text) => {
+        const t = (text || '').trim()
+        if (!t) {
+          setMessage('剪贴板是空的')
+          setTimeout(() => setMessage(''), 2000)
+          return
+        }
+        cnc.pinyinInput(t, 0, false)
+          .then((data) => {
+            setMessage(data?.status === 'success' ? '开始输入' : (data?.message || '输入失败'))
+            setTimeout(() => setMessage(''), 2000)
+          })
+          .catch(() => setMessage('输入请求失败'))
+      })
+      .catch(() => {
+        setMessage('无法读取剪贴板')
+        setTimeout(() => setMessage(''), 2000)
+      })
+  }
+
   // 录制中每 0.1s 拉取一次坐标
   useEffect(() => {
     let interval
@@ -229,20 +261,28 @@ function App() {
     // 这里原本还会往屏幕最底下贴一条黑色调试条(显示按键信息)——
     // 那条带子已经删掉了(挡住屏幕底下的内容),但快捷键保留。
     const onKeyDown = (e) => {
-      // 快捷键:**⌃S** = 默认执行(回放)、**⌃D** = 读剪贴板并键入。
+      // ⚠️ **Windows 线这两个键一律不接管**(2026-10-24 用户口径)。
+      //
+      // - **⌃D 是 Windows 的系统默认键**。抢过来 ⇒ 用户在自己常用的软件里
+      //   按 ⌃D,那个软件/系统对话框会**直接被关掉**。
+      //   (用户原话:「我不能设置为快捷键,不然他直接把软件退出了」。)
+      // - **⌃S 同为系统默认键**(「保存」),而且它驱动的「默认执行(回放)」
+      //   在 Windows 上**已经没有界面了**(上一轮按用户口径撤掉:
+      //   「本来就没有这个功能」)⇒ 留着它就是一个**没有入口的隐藏功能**:
+      //   用户在窗口里随手按一下 ⌃S,屏幕上就会开始**自己动鼠标**。
+      //
+      // 所以 Windows 线:**系统里不注册、窗口内也不拦** —— ⌃S / ⌃D 就是普通按键。
+      // 「读剪贴板并键入」这个能力**没丢**:搬到了「键盘输入」页的按钮上。
+      //
+      // 下面这两条是 macOS 线(⌃S 默认执行 / ⌃D 读剪贴板并键入),
       // 只认 **Control**:不认 Win/Alt,也不要求 Shift(带 Shift 照样触发)——
       // 两个平台**逐字一致**(见 ADR-0013)。
-      //
-      // ⚠️ ⌃D 这一条在 **Windows 上不走这里**:Windows 线的 ⌃D 由**主进程的全局
-      //   快捷键**接管(读剪贴板 → `send_text` 逐字键入)。全局热键由系统吞掉按键,
-      //   渲染进程**收不到** Ctrl+D 的 keydown ⇒ 不会两条路都触发
-      //   (都触发 = 剪贴板内容被键入两遍)。
-      //   这里的 `!isWindows` 两个平台保持一致 —— 别只改一边。
+      if (isWindows) return
       if (e.ctrlKey && e.code === 'KeyS') {
         e.preventDefault()
         defaultExecuteRef.current()
       }
-      if (e.ctrlKey && e.code === 'KeyD' && !isWindows) {
+      if (e.ctrlKey && e.code === 'KeyD') {
         e.preventDefault()
         setMessage('读取剪贴板中...')
         setTimeout(() => setMessage(''), 2000)
@@ -586,6 +626,8 @@ function App() {
     name,
     onNameChange: setName,
     onPinyinInput: (text) => requestPinyinInput(text || ''),
+    // 「从剪贴板读入并键入」:原 ⌃D 全局快捷键撤掉后,这个能力从这里进。
+    onPasteFromClipboard: () => requestPasteFromClipboard(),
     onClearText: () => setName(''),
     pinyinCountdown,
     message,
@@ -655,18 +697,54 @@ function App() {
         hideCompleteButton={false}
         corner={
           /* macOS 用原生红绿灯(见 main.js 的 titleBarStyle/trafficLightPosition),
-             这里只给没有原生按钮的平台兜底 */
-          !isMac && <button
-            type="button"
-            onClick={() => cnc.quit?.()}
-            title="关闭（⌘Q）"
-            aria-label="关闭"
-            className="h-6 w-6 flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+             这里只给没有原生按钮的平台兜底。
+
+             Windows 线自绘**三个**按钮(2026-10-24 用户口径:
+             「右上角做一个三个按钮,就是最大化最小化或者说直接关掉,
+               别只留一个关掉的按钮」):
+             最小化 / 最大化(再点一次还原)/ 关闭。
+
+             ⚠️ 「关闭」**不是退出**:它只是把窗口**藏起来**,进程留着
+             (用户口径:「点叉他就直接完全退出了,这个他要在后台挂着,
+             功能依然生效」)。唤回靠**托盘图标**(或再运行一次程序),
+             彻底退出靠**托盘菜单的「退出程序」**。 */
+          !isMac && (
+            <div className="flex items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => cnc.minimize?.()}
+                title="最小化"
+                aria-label="最小化"
+                className="h-6 w-6 flex items-center justify-center rounded text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M5 12h14" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => cnc.maximize?.()}
+                title="最大化（再点一次还原）"
+                aria-label="最大化"
+                className="h-6 w-6 flex items-center justify-center rounded text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round">
+                  <rect x="5" y="5" width="14" height="14" rx="1.5" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => cnc.hide?.()}
+                title="关闭窗口（程序留在后台运行；托盘图标可以叫回来）"
+                aria-label="关闭"
+                className="h-6 w-6 flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M18 6 6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )
         }
       >
         <Step>
