@@ -156,6 +156,44 @@ const PROBE = () => {
   };
 };
 
+/**
+ * 盯着一整段换页动画采样,采到「动画停了」为止。
+ *
+ * ## 为什么不能只采固定 400ms
+ * 动画时长本身就是 0.4s(`Stepper.jsx` 的 `transition={{ duration: 0.4 }}`),
+ * 而「点击 → React 重渲染 → 动画起跑」还要再花掉一点时间。
+ * 早先这里固定采 10×40ms = 400ms —— **采样窗口和动画一样长**,
+ * 机器一慢(动画起跑晚几十毫秒),产生横向溢出那一段就被整个错过,
+ * 「判别性检查」于是随机翻红(2026-10-24 在 CI 上真红过一次:
+ * 代码与上一次绿灯完全相同,只改了文档)。
+ *
+ * 现在改成:采到「已经看到溢出 **且** 动画确实停了」,或者到超时为止。
+ * **判据没变** —— 动画真的跑了、真的横向溢出了,才算通过;
+ * 动画没跑(真回归)依然会被抓住,只是不再靠运气。
+ */
+async function watchTransition(page, { timeoutMs = 4000, settleMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let sawSlide = false;
+  let sawOverflow = false;
+  let worstH = 0;
+  let overflowX = '';
+  let lastSlideAt = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 40));
+    const p = await page.evaluate(PROBE);
+    if (!p) continue;
+    overflowX = p.overflowX;
+    worstH = Math.max(worstH, p.hScrollSpace);
+    if (p.sliding > 0) {
+      sawSlide = true;
+      lastSlideAt = Date.now();
+    }
+    if (p.scrollW > p.clientW + 1) sawOverflow = true;
+    if (sawOverflow && sawSlide && Date.now() - lastSlideAt > settleMs) break;
+  }
+  return { sawSlide, sawOverflow, worstH, overflowX };
+}
+
 /** 点第 n 个步骤圆圈(1-based) */
 const GOTO = (n) => {
   const circles = [...document.querySelectorAll('div')].filter((d) => {
@@ -203,17 +241,8 @@ test('换页:底下不许有横向滚动条,画面横滑动画不许丢', async 
 
   // ── 切页过程中:横向滚动条一处都不许占位 ──
   await page.evaluate(GOTO, 2);
-  let worstH = 0;
-  let sawSlide = false;
-  let sawOverflow = false;
-  for (let i = 0; i < 10; i++) {
-    await new Promise((r) => setTimeout(r, 40));
-    const p = await page.evaluate(PROBE);
-    if (!p) continue;
-    worstH = Math.max(worstH, p.hScrollSpace);
-    if (p.sliding > 0) sawSlide = true;
-    if (p.scrollW > p.clientW + 1) sawOverflow = true;
-  }
+  const during = await watchTransition(page);
+  const { sawSlide, sawOverflow, worstH } = during;
   assert.ok(sawSlide, '切换过程中没有层在横向移动 —— 「画面直接划过去」的动画丢了');
   assert.ok(
     sawOverflow,
@@ -225,24 +254,28 @@ test('换页:底下不许有横向滚动条,画面横滑动画不许丢', async 
     '切换过程中内容区底部出现了一条横向滚动条(占位 ' + worstH + 'px)—— 用户说的「下面那条滑条」'
   );
 
-  // ── 判别性:把 overflow-x 改回 auto,同样的横向溢出就会让浏览器
+  // 判别性:把 overflow-x 改回 auto,同样的横向溢出就会让浏览器
   //    画出一条横向滚动条(= 用户看到的那条)。改回来仍要是 hidden。
+  //
+  // 「往返一次」最多试 3 轮:每一轮都真的换页一次(1 → 2),
+  // 采到溢出就算数。之所以要重试而不是只等一次 ——
+  // 溢出只在**动画正在跑**的那一瞬间存在,采样窗口要是没罩住它,
+  // 就会把「窗口没罩住」误判成「前提不成立」(2026-10-24 CI 上真红过)。
+  // 3 轮都没溢出 ⇒ 那就不是窗口问题,是真的没溢出 ⇒ 照样红。
   await page.evaluate(() => {
     const card = document.querySelector('.rounded-4xl');
     const scroller = [...card.querySelectorAll('div')].find((d) => getComputedStyle(d).overflowY === 'auto');
     scroller.style.overflowX = 'auto';
   });
-  await page.evaluate(GOTO, 1);
-  await new Promise((r) => setTimeout(r, 700));
-  await page.evaluate(GOTO, 2);
   let sawOverflowAuto = false;
   let overflowXAuto = '';
-  for (let i = 0; i < 10; i++) {
-    await new Promise((r) => setTimeout(r, 40));
-    const p = await page.evaluate(PROBE);
-    if (!p) continue;
-    overflowXAuto = p.overflowX;
-    if (p.scrollW > p.clientW + 1) sawOverflowAuto = true;
+  for (let round = 0; round < 3 && !sawOverflowAuto; round++) {
+    await page.evaluate(GOTO, 1);
+    await new Promise((r) => setTimeout(r, 700));
+    await page.evaluate(GOTO, 2);
+    const w = await watchTransition(page);
+    if (w.overflowX) overflowXAuto = w.overflowX;
+    sawOverflowAuto = w.sawOverflow;
   }
   assert.strictEqual(overflowXAuto, 'auto', '改回 auto 没生效,这条判别检查等于没跑');
   assert.ok(
