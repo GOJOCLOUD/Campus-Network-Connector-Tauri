@@ -633,7 +633,15 @@ function App() {
         nextButtonText="下一步"
         disableStepIndicators={!isActivated}
         nextDisabled={!isActivated}
-        hideCompleteButton={isWindows}
+        // 「完成」按钮:**显示**(和 macOS 一致)。
+        //
+        // 最后一步点「完成」会把整个面板**收起**(isCompleted → 高度 0),
+        // 收起后还能靠顶上的步骤圈再点回来。
+        // 以前 Windows 少一步、最后一步正是主操作界面「默认执行」——
+        // 那一屏被收起就没法操作了,所以那时候把这个按钮藏了。
+        // 2026-10-24 确认「键盘输入」这一步在 Windows 上也保留之后,
+        // 最后一步不再是主操作界面 ⇒ 按钮照常显示。
+        hideCompleteButton={false}
         corner={
           /* macOS 用原生红绿灯(见 main.js 的 titleBarStyle/trafficLightPosition),
              这里只给没有原生按钮的平台兜底 */
