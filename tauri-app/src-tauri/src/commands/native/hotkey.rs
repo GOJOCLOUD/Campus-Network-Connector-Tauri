@@ -15,12 +15,14 @@
 //!
 //! ## 自己监听能拿到什么
 //!
-//! - 匹配只看"**有没有** ⌃⇧ / ⌘⇧",多余的修饰键(Fn、⌥)一律忽略 ⇒ 容错变大;
-//! - **把按键吃掉**(返回 None)⇒ 别的应用收不到,绝不漏出 D;
+//! - 匹配只看"**有没有** Control",多余的修饰键(Fn、⌥、Shift)一律忽略 ⇒ 容错变大;
+//! - **把按键吃掉** ⇒ 别的应用收不到,绝不漏出 D;
 //! - 被系统禁用(超时)后自己重建 tap ⇒ 不会"用着用着就没了";
 //! - 不依赖系统热键注册表 ⇒ 不会被别的进程抢走。
 //!
-//! 口径与 Electron 版一致:⌃⇧A = 默认执行,⌃⇧D = 读剪贴板并键入。
+//! 口径与 Electron 版 / Windows 线一致:**⌃S** = 默认执行,**⌃D** = 读剪贴板并键入
+//! (只认 Control;判定与 latch 状态机都在**平台无关**的
+//! `super::hotkey_core` 里,两个平台跑的是同一份 —— 见 ADR-0025)。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -34,25 +36,36 @@ use core_graphics::event::{
     CGEventType, EventField,
 };
 
-/// macOS **虚拟键码**(不是字符):A=0、D=2。
-const KEY_A: i64 = 0;
+use super::hotkey_core::{self, Hotkey, PrimaryKey, MOD_ALT, MOD_CONTROL, MOD_META, MOD_SHIFT};
+
+/// macOS **虚拟键码**(不是字符):S=1、D=2。
+const KEY_S: i64 = 1;
 const KEY_D: i64 = 2;
 
-/// 命中的快捷键。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Hotkey {
-    /// ⌃⇧A / ⌘⇧A:默认执行(回放选中的录制文件)
-    Execute,
-    /// ⌃⇧D / ⌘⇧D:读剪贴板并键入
-    Paste,
+/// macOS 的事件标志位 → **平台无关**的修饰键掩码。
+fn flags_to_mods(flags: CGEventFlags) -> u8 {
+    let mut mods = 0u8;
+    if flags.contains(CGEventFlags::CGEventFlagShift) {
+        mods |= MOD_SHIFT;
+    }
+    if flags.contains(CGEventFlags::CGEventFlagControl) {
+        mods |= MOD_CONTROL;
+    }
+    if flags.contains(CGEventFlags::CGEventFlagAlternate) {
+        mods |= MOD_ALT;
+    }
+    if flags.contains(CGEventFlags::CGEventFlagCommand) {
+        mods |= MOD_META;
+    }
+    mods
 }
 
-impl Hotkey {
-    fn label(&self) -> &'static str {
-        match self {
-            Hotkey::Execute => "⌃⇧A",
-            Hotkey::Paste => "⌃⇧D",
-        }
+/// macOS 的虚拟键码 → **平台无关**的主键。
+fn primary_of(keycode: i64) -> PrimaryKey {
+    match keycode {
+        KEY_S => PrimaryKey::S,
+        KEY_D => PrimaryKey::D,
+        _ => PrimaryKey::Other,
     }
 }
 
@@ -85,22 +98,12 @@ pub fn last_error() -> String {
 
 /// 事件是不是我们要的组合键。
 ///
-/// 只看"有没有 ⌃⇧ / ⌘⇧":多带 Fn、⌥ 之类的一律忽略 —— 这正是系统热键做不到、
-/// 也是"必须按得极其精准"的来源。
+/// 判定本身在**平台无关**的 `super::hotkey_core::match_hotkey` 里
+/// (只认 Control:不多要 Shift、不认 Command),这里只负责把
+/// macOS 的键码与事件标志翻译成平台无关的表示。
 fn match_hotkey(event: &CGEvent) -> Option<Hotkey> {
-    let flags = event.get_flags();
-    let shift = flags.contains(CGEventFlags::CGEventFlagShift);
-    let ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
-    let cmd = flags.contains(CGEventFlags::CGEventFlagCommand);
-    if !shift || !(ctrl || cmd) {
-        return None;
-    }
     let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-    match keycode {
-        KEY_A => Some(Hotkey::Execute),
-        KEY_D => Some(Hotkey::Paste),
-        _ => None,
-    }
+    hotkey_core::match_hotkey(primary_of(keycode), flags_to_mods(event.get_flags()))
 }
 
 /// 启动快捷键监听(独立线程 + 自己的 run loop,和录制那一套一样)。

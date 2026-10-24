@@ -37,12 +37,17 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "level": native_window_level(&app),
                 }),
             );
-            // 全局快捷键:注册成功没有(Electron 版有 ⌃⇧A / ⌃⇧D 两个)
+            // 全局快捷键:注册成功没有(Electron 版有 ⌃S / ⌃D 两个)
             // macOS 是自己监听事件(见 native::hotkey),那边还有 tap 的状态;
-            // 其它平台是系统的全局热键。
+            // Windows 是系统的全局热键 + latch 的观察源(见 native::hotkey_win)。
+            //
+            // 两边的**形状一样**:alive / error / latchArmed ——
+            // 「按了快捷键没反应」时靠这一栏分清是"没送来"还是"latch 还锁着"。
             #[cfg(target_os = "macos")]
             let tap_state = nativecmd::hotkey::diagnostics();
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            let tap_state = nativecmd::hotkey_win::diagnostics();
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let tap_state = serde_json::Value::Null;
             obj.insert(
                 "shortcuts".to_string(),
@@ -436,7 +441,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        // 全局快捷键:⌃⇧A 默认执行 / ⌃⇧D 剪贴板直输(macOS)。
+        // 全局快捷键:⌃S 默认执行 / ⌃D 剪贴板直输。
         // 快捷键走的是**后端**这条路 —— 界面没打开时也要能用。
         .plugin(tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|app, shortcut, event| {
@@ -445,13 +450,32 @@ pub fn run() {
                 }
                 let id = shortcut.id();
                 if id == shortcut_id(SHORTCUT_DEFAULT_EXECUTE) {
+                    // **Windows 上过一道 latch**:触发一次之后必须松开 Control
+                    // 才重新武装(规则与 macOS 线一字不差,状态机是同一份 ——
+                    // 见 native::hotkey_core)。
+                    // macOS 那边 latch 在事件 tap 里面,不在这个 handler 里。
+                    #[cfg(target_os = "windows")]
+                    if !nativecmd::hotkey_win::try_fire(nativecmd::hotkey_core::Hotkey::Execute) {
+                        commands::shortcuts::record_shortcut_hit(
+                            "⌃S",
+                            "latch 还锁着(Control 还没松开),这次没有重复执行",
+                        );
+                        return;
+                    }
                     if let Err(e) = commands::shortcuts::trigger_default_execute(app) {
                         eprintln!("[shortcut] 默认执行失败: {}", e);
                     }
                 } else if id == shortcut_id(SHORTCUT_PASTE) {
-                    // 剪贴板直输要切输入源,只有 macOS 有这套打法
-                    // (Windows 直接送 Unicode 字符,不需要这个快捷键 —— 与 Electron 版一致)
-                    #[cfg(target_os = "macos")]
+                    // 剪贴板直输:两个平台**同构**(读剪贴板 → 逐字键入),
+                    // 只有「切输入源」那一步是 macOS 专属。
+                    #[cfg(target_os = "windows")]
+                    if !nativecmd::hotkey_win::try_fire(nativecmd::hotkey_core::Hotkey::Paste) {
+                        commands::shortcuts::record_shortcut_hit(
+                            "⌃D",
+                            "latch 还锁着(Control 还没松开),这次没有重复执行",
+                        );
+                        return;
+                    }
                     if let Err(e) = commands::shortcuts::trigger_pinyin_from_clipboard(app) {
                         eprintln!("[shortcut] 剪贴板直输失败: {}", e);
                     }
@@ -494,6 +518,7 @@ pub fn run() {
             nativecmd::stop_recording,
             nativecmd::get_recording_clicks,
             nativecmd::clear_recording_clicks,
+            nativecmd::remove_recording_click,
             nativecmd::is_recording,
             nativecmd::tap_failed,
             commands::play::play_file,
@@ -531,20 +556,54 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }
+            // 录制用的「排除矩形」必须**跟着窗口走**。
+            //
+            // 「点自己界面上的按钮不算一次点击」靠它实现:落在自己窗口范围内的
+            // 点击不记。矩形不能只在开始录制时拍一张快照 ——
+            // 窗口是**贴合内容**的:录制列表一出现,内容变高,窗口就跟着长,
+            // 「结束」按钮于是跑出了开始时那张快照 → 点「结束」自己被记一次。
+            //
+            // (前端**不再传**那张快照 —— 那是「开始那一刻」的旧值,窗口一动就过期。
+            //  矩形由原生层按当前窗口位置算,见 native::window_exclude_rect。)
+            if let Some(w) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                w.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                        if let Some(rect) = nativecmd::window_exclude_rect(&handle) {
+                            nativecmd::rec::set_exclude_rect(Some(rect));
+                        }
+                    }
+                    _ => {}
+                });
+            }
             // 注册全局快捷键。
             //
             // - **macOS**:自己用事件监听实现(见 `native::hotkey`)。
             //   系统的全局热键要求修饰键**一模一样**:手上多带一个 Fn/⌥ 就对不上,
             //   按键没被吃掉 → 那个 D 就漏进了当前应用("多打出一个 D"),
             //   同时动作也不执行(看起来就是"快捷键失灵")。
-            //   自己监听:匹配只看"有没有 ⌃⇧/⌘⇧",并把按键吃掉,被系统禁用还能重建。
-            // - **Windows**:用系统的全局热键(那边没有输入源切换这套打法,
-            //   ⌃⇧A 走同一条路)。
+            //   自己监听:匹配只看"有没有 Control",并把按键吃掉,被系统禁用还能重建。
+            // - **Windows**:用系统的全局热键(`RegisterHotKey`),
+            //   另有一个线程盯着 Control 的按下/松开 —— latch 靠它才解得开
+            //   (见 `native::hotkey_win`)。
             #[cfg(target_os = "macos")]
             {
                 match nativecmd::hotkey::start(app.handle().clone()) {
                     Ok(_) => nativecmd::hotkey::set_expected(true),
                     Err(e) => eprintln!("[shortcut] 快捷键监听启动失败: {}", e),
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // Control 的按下/松开观察源 —— latch 靠它才解得开。
+                // 起不来就**如实降级**(latch 不生效,并在诊断里写明),
+                // 绝不假装 latch 在工作。
+                match nativecmd::hotkey_win::start() {
+                    Ok(_) => nativecmd::hotkey_win::set_expected(true),
+                    Err(e) => eprintln!(
+                        "[shortcut] Control 观察线程启动失败,latch 降级为不生效: {}",
+                        e
+                    ),
                 }
             }
             #[cfg(not(target_os = "macos"))]
@@ -604,9 +663,12 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let gs = app.global_shortcut();
-    let mut keys = vec![SHORTCUT_DEFAULT_EXECUTE];
-    #[cfg(target_os = "macos")]
-    keys.push(SHORTCUT_PASTE);
+    // **两个都要注册**:⌃S 默认执行、⌃D 剪贴板直输。
+    //
+    // 之前 Windows 这边只注册了 ⌃S —— ⌃D 的常量写着 `Control+D`,
+    // 界面上也写着这个快捷键,但系统里**根本没注册** ⇒ 按下去什么都不发生。
+    // 现在两个平台的快捷键是同一对。
+    let keys = vec![SHORTCUT_DEFAULT_EXECUTE, SHORTCUT_PASTE];
 
     let mut ok_list: Vec<String> = Vec::new();
     for key in keys {
@@ -628,15 +690,19 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
 /// 快捷键的组合键字符串。
 ///
 /// ⚠️ **必须写 `Control`,不能写 `CmdOrControl`**:
-/// Electron 版注册的是 `globalShortcut.register('Ctrl+Shift+A' / 'Ctrl+Shift+D')`
-/// —— 也就是 **⌃⇧A / ⌃⇧D**。
+/// Electron 版注册的是 `globalShortcut.register('Ctrl+S' / 'Ctrl+D')`
+/// —— 也就是 **⌃S / ⌃D**。
 /// 而 `CmdOrControl` 在 macOS 上会被解析成 **⌘(Command)**(global-hotkey 的
 /// `CMDORCONTROL` 在 macOS 分支映射到 `Modifiers::SUPER`),
-/// 结果就是:系统里监听的是 ⌘⇧D,用户按 ⌃⇧D **什么都不会发生**。
+/// 结果就是:系统里监听的是 ⌘D,用户按 ⌃D **什么都不会发生**。
 ///
 /// `Control` 在所有平台都是 Control,和 Electron 版完全同口径。
-const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+Shift+A";
-const SHORTCUT_PASTE: &str = "Control+Shift+D";
+///
+/// ⚠️ **不要加 Shift**:原来要「⌃⇧ + 字母」三根手指一起按,太别扭
+/// (2026-10-23 用户要求:「只要按住 Ctrl 再点一下字母」)。
+/// 判定只看「有没有 Control」——见 `commands::native::hotkey_core::match_hotkey`。
+const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+S";
+const SHORTCUT_PASTE: &str = "Control+D";
 
 /// 把组合键字符串解析成插件的 Shortcut。
 fn parse_shortcut(key: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
@@ -654,10 +720,10 @@ mod shortcut_tests {
     use super::*;
     use tauri_plugin_global_shortcut::Modifiers;
 
-    /// 快捷键必须与 Electron 版**同口径**:⌃⇧A / ⌃⇧D(Control),不是 ⌘⇧(Command)。
+    /// 快捷键必须与 Electron 版**同口径**:⌃S / ⌃D(Control),不是 ⌘(Command)。
     ///
     /// 这条写死过:写成了 `CmdOrControl+Shift+D`,在 macOS 上被解析成 ⌘,
-    /// 用户按 ⌃⇧D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
+    /// 用户按 ⌃D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
     #[test]
     fn 全局快捷键是Control不是Command() {
         for key in [SHORTCUT_DEFAULT_EXECUTE, SHORTCUT_PASTE] {
@@ -674,10 +740,10 @@ mod shortcut_tests {
                 key
             );
             assert!(
-                s.mods.contains(Modifiers::SHIFT),
-                "{} 必须带 Shift,实际 mods={:?}",
-                key,
-                s.mods
+                !s.mods.contains(Modifiers::SHIFT),
+                "{} 不要再带 Shift —— 原来要「⌃⇧ + 字母」三根手指一起按,太别扭 \
+                 (2026-10-23 用户要求:「只要按住 Ctrl 再点一下字母」)",
+                key
             );
         }
     }

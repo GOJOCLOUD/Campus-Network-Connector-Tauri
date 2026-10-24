@@ -18,6 +18,17 @@ pub fn start_recording(_exclude_rect: Option<[f64; 4]>) -> Result<bool, String> 
     Err(UNSUPPORTED.to_string())
 }
 
+/// 设置排除矩形 —— Windows 线不做录制,这里是空实现。
+///
+/// 命令照样占住,让上层代码在两个平台上**形状一致**
+/// (免得 Windows 上因为少了这个函数而编译不过)。
+pub fn set_exclude_rect(_rect: Option<[f64; 4]>) {}
+
+/// 删掉第 index 次点击 —— Windows 线不做录制,这里是空实现。
+pub fn remove_click(_index: usize) -> bool {
+    false
+}
+
 pub fn stop_recording() -> bool {
     false
 }

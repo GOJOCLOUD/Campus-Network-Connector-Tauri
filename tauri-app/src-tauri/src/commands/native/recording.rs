@@ -75,6 +75,29 @@ fn in_exclude(rect: &Option<[f64; 4]>, x: f64, y: f64) -> bool {
     }
 }
 
+/// 设置排除矩形(自身窗口的屏幕坐标范围)。
+///
+/// 由 App 层在窗口移动/变高时调用,保证矩形始终是当前的。
+///
+/// 为什么不能只在开始录制时拍一张:窗口是**贴合内容**的 —— 录制列表一出现,
+/// 窗口就变高/上移,「结束」按钮于是跑出了开始时那张矩形 ⇒ 点「结束」自己
+/// 会被记成一次点击(用户报的 bug)。
+pub fn set_exclude_rect(rect: Option<[f64; 4]>) {
+    *recorder().exclude.lock().unwrap() = rect;
+}
+
+/// 删掉已录到的第 index 次点击(单条删除)。
+///
+/// 越界就什么都不做,返回有没有删掉。
+pub fn remove_click(index: usize) -> bool {
+    let mut clicks = recorder().clicks.lock().unwrap();
+    if index >= clicks.len() {
+        return false;
+    }
+    clicks.remove(index);
+    true
+}
+
 /// 开始录制。
 ///
 /// `exclude_rect` 是自身窗口的 `[left, top, right, bottom]`(屏幕全局坐标),

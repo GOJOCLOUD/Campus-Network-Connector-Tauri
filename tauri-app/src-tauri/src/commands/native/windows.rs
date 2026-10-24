@@ -9,6 +9,7 @@
 //! 界面也已经把那两步去掉了,所以这里只给空实现。
 
 use std::mem::size_of;
+use std::time::Duration;
 
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -138,4 +139,85 @@ pub fn current_input_source_info() -> Result<crate::commands::native::InputSourc
 /// 切换输入源 —— Windows 没有等价能力。
 pub fn select_input_source(_source_id: String) -> Result<bool, String> {
     Ok(true)
+}
+
+/// ── 剪贴板 ────────────────────────────────────────────────────────
+///
+/// macOS 那边走 NSPasteboard(`native.rs` 里直接调 objc2-app-kit);
+/// Windows 这边走 Win32 的 `OpenClipboard` / `GetClipboardData`。
+/// 两边返回的都是同一件事:**一段纯文本**。
+
+/// 剪贴板格式 `CF_UNICODETEXT`(13)。
+///
+/// `windows` crate 把它放在 `Win32_System_Ole` 里 —— 那个 feature 会拖进
+/// 一大片 COM/OLE 绑定,为了一个常量不值得,所以这里直接写值 + 注释。
+/// (值是 Win32 定死的,不会变。)
+const CF_UNICODETEXT: u32 = 13;
+
+/// 读剪贴板里的文本(UTF-16)。
+///
+/// ## 为什么要有
+///
+/// ⌃D「剪贴板直输」要的就是这段文本 —— Windows 上没有输入源切换那套打法,
+/// 直接把剪贴板里的字敲出去就完事了(见 ADR-0025)。
+///
+/// ## 几个坑
+///
+/// - 剪贴板是**全局**资源:别的进程可能正开着它 ⇒ `OpenClipboard` 会失败。
+///   重试几次(剪贴板被占用通常是瞬时的)。
+/// - `OpenClipboard` 成功之后**必须** `CloseClipboard` —— 忘了的话
+///   别的程序再也打不开剪贴板(用户会看到"复制到别处全都不管用了")。
+/// - 拿到的内存块要用 `GlobalLock` / `GlobalUnlock` 包起来,
+///   且 `GlobalUnlock` 要在**同一个线程**上调用。
+pub fn clipboard_read_text() -> Result<String, String> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+
+    // 打开剪贴板:可能正被别人占着,重试几次。
+    let mut opened = false;
+    for _ in 0..5 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !opened {
+        return Err("打不开剪贴板(可能正被别的程序占用)".to_string());
+    }
+
+    let result = read_clipboard_unicode();
+
+    // 无论如何都要关 —— 忘了会让别的程序再也用不了剪贴板。
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    result
+}
+
+/// 已经在打开剪贴板的状态下,把文本读出来。
+fn read_clipboard_unicode() -> Result<String, String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+
+    let handle = unsafe { GetClipboardData(CF_UNICODETEXT) }
+        .map_err(|_| "剪贴板里没有文本".to_string())?;
+    let hglobal = HGLOBAL(handle.0);
+    let ptr = unsafe { GlobalLock(hglobal) };
+    if ptr.is_null() {
+        return Err("读剪贴板内容失败(GlobalLock 返回空)".to_string());
+    }
+    // 剪贴板里的文本是 UTF-16、以两个 0 结尾。
+    let mut len = 0usize;
+    unsafe {
+        let mut p = ptr as *const u16;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        let slice = std::slice::from_raw_parts(ptr as *const u16, len);
+        let text = String::from_utf16_lossy(slice);
+        let _ = GlobalUnlock(hglobal);
+        Ok(text)
+    }
 }
