@@ -22,7 +22,7 @@
 //! - 被系统禁用(超时)后自己重建 tap ⇒ 不会"用着用着就没了";
 //! - 不依赖系统热键注册表 ⇒ 不会被别的进程抢走。
 //!
-//! 口径与 Electron 版一致:**⌃S** = 默认执行,**⌃D** = 读剪贴板并键入
+//! 口径与 Electron 版一致:**⌃S** = 默认执行,**⌃⇧D** = 读剪贴板并键入
 //! (只认 Control、不认 Command;详见 ADR-0024)。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,6 +75,12 @@ struct TapState {
     /// 记时刻是为了**只认"刚刚"按下的那个键** —— 否则"按住 A 打字好几秒,
     /// 后来又按了 ⌃"会被误判成快捷键,白白触发一次回放。
     pressed_keys: Vec<(i64, Instant)>,
+    /// **修饰键的粘滞窗口** —— 见 `hotkey_core::StickyModifiers`。
+    ///
+    /// 用户 2026-10-25 的口径:「三个按键只要在一定时间内按了就可以触发,
+    /// 别搞了非常严格的顺序,或者说时间间隔特别短」。
+    /// ⇒ 修饰键在窗口内**按下过**就算数(哪怕此刻已经松开)。
+    sticky: hotkey_core::StickyModifiers,
     /// **触发许可(latch)** —— 见 `Latch`。
     latch: Latch,
 }
@@ -111,6 +117,7 @@ impl Default for TapState {
             pending_keyups: Vec::new(),
             modifiers: CGEventFlags::empty(),
             pressed_keys: Vec::new(),
+            sticky: hotkey_core::StickyModifiers::new(),
             latch: Latch::new(),
         }
     }
@@ -231,8 +238,8 @@ fn primary_of(keycode: i64) -> PrimaryKey {
 ///
 /// 拆成纯函数也是为了让单测**不碰系统**:单测在 CI 上没有「辅助功能」权限,
 /// 连构造事件源都可能失败,断言一旦依赖环境就会漂(2026-10-23 踩过这个坑)。
-fn match_hotkey_raw(keycode: i64, flags: CGEventFlags) -> Option<Hotkey> {
-    hotkey_core::match_hotkey(primary_of(keycode), flags_to_mods(flags))
+fn match_hotkey_raw(keycode: i64, mods: u8) -> Option<Hotkey> {
+    hotkey_core::match_hotkey(primary_of(keycode), mods)
 }
 
 /// **有效**的修饰键 = 自己跟踪到的 ∪ 事件自带的。
@@ -259,17 +266,11 @@ fn effective_modifiers(tracked: CGEventFlags, from_event: CGEventFlags) -> CGEve
 /// 这里只做 macOS 的键码/修饰键翻译。
 fn find_pending_hotkey(
     pressed: &[(i64, Instant)],
-    modifiers: CGEventFlags,
+    modifiers: u8,
     now: Instant,
     window: Duration,
 ) -> Option<(i64, Hotkey)> {
-    hotkey_core::find_pending_hotkey(
-        pressed,
-        primary_of,
-        flags_to_mods(modifiers),
-        now,
-        window,
-    )
+    hotkey_core::find_pending_hotkey(pressed, primary_of, modifiers, now, window)
 }
 
 /// 启动快捷键监听(独立线程 + 自己的 run loop,和录制那一套一样)。
@@ -414,7 +415,15 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                             }
                         }
                         let effective = effective_modifiers(s.modifiers, event_flags);
-                        let matched = match_hotkey_raw(keycode, effective);
+                        // **粘滞窗口**(2026-10-25 用户口径):修饰键在窗口内**按下过**
+                        // 就算数 —— 「三个键只要在一定时间内按了就能触发,
+                        // 别搞了非常严格的顺序,或者说时间间隔特别短」。
+                        let mods = s.sticky.effective(
+                            flags_to_mods(effective),
+                            Instant::now(),
+                            RECOGNIZE_WINDOW,
+                        );
+                        let matched = match_hotkey_raw(keycode, mods);
                         if matched.is_some() {
                             // 记住 keyup 也要吞
                             s.pending_keyups.push(keycode);
@@ -435,8 +444,8 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                         }
                         // **吞掉** —— 哪怕这次没触发(锁着)。
                         //
-                        // 用户要的是「Ctrl+D 整个按键不再继续影响它」:
-                        // 放行的话,按住 Ctrl 连按 D 会往前台丢一串 ⌃D。
+                        // 用户要的是「Ctrl+Shift+D 整个按键不再继续影响它」:
+                        // 放行的话,按住 ⌃⇧ 连按 D 会往前台丢一串 ⌃⇧D。
                         return swallow(event);
                     }
                     None
@@ -476,14 +485,25 @@ fn build_tap(app: tauri::AppHandle) -> Result<CGEventTap<'static>, String> {
                         // 这时绝不能把 latch 解开,否则按住 Ctrl 连按会连着触发。
                         let ctrl_now = flags.contains(CGEventFlags::CGEventFlagControl);
                         let ctrl_before = s.modifiers.contains(CGEventFlags::CGEventFlagControl);
+                        // **新按下的修饰键**(旧的不含、新的含)⇒ 记下时刻。
+                        // 这是**粘滞窗口**的输入:⌃⇧D 里,Shift 在窗口内按下过就算数,
+                        // 哪怕此刻已经松开(顺序不限、间隔别太短)。
+                        let newly_down = flags_to_mods(flags) & !flags_to_mods(s.modifiers);
                         s.modifiers = flags;
+                        if newly_down != 0 {
+                            s.sticky.note_press(newly_down, Instant::now());
+                        }
                         if ctrl_now != ctrl_before {
                             s.latch.on_ctrl_change(ctrl_now);
                         }
                         // 回头看已经按下的键(顺序无关)
                         let found = find_pending_hotkey(
                             &s.pressed_keys,
-                            flags,
+                            s.sticky.effective(
+                                flags_to_mods(flags),
+                                Instant::now(),
+                                RECOGNIZE_WINDOW,
+                            ),
                             Instant::now(),
                             RECOGNIZE_WINDOW,
                         );
@@ -612,28 +632,49 @@ mod tests {
     const CTRL: CGEventFlags = CGEventFlags::CGEventFlagControl;
     const CMD: CGEventFlags = CGEventFlags::CGEventFlagCommand;
 
-    /// ⌃S / ⌃D 要认得出来 —— **只要 Control 在位**就行。
+    /// 判定函数收的是**掩码**(u8),不是 `CGEventFlags`。
+    const SHIFT_M: u8 = MOD_SHIFT;
+    const CTRL_M: u8 = MOD_CONTROL;
+    const CMD_M: u8 = MOD_META;
+
+    /// ⌃S 只要 Control;**⌃⇧D 要 Control + Shift**(2026-10-25 改口径)。
     #[test]
     fn 认得出两个快捷键() {
-        assert_eq!(match_hotkey_raw(KEY_S, CTRL), Some(Hotkey::Execute));
-        assert_eq!(match_hotkey_raw(KEY_D, CTRL), Some(Hotkey::Paste));
+        assert_eq!(match_hotkey_raw(KEY_S, CTRL_M), Some(Hotkey::Execute));
+        assert_eq!(
+            match_hotkey_raw(KEY_D, SHIFT_M | CTRL_M),
+            Some(Hotkey::Paste)
+        );
+    }
+
+    /// **光按 ⌃D 不再触发** —— 剪贴板直入改成 **⌃⇧D**
+    /// (用户 2026-10-25:「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」)。
+    #[test]
+    fn 光Control的D不再触发() {
+        assert_eq!(match_hotkey_raw(KEY_D, CTRL_M), None);
     }
 
     /// 多带一个 Shift 也照样触发(容错),但**光有 Shift 不算**。
     #[test]
     fn 只认Control_Shift可有可无() {
-        assert_eq!(match_hotkey_raw(KEY_S, SHIFT | CTRL), Some(Hotkey::Execute));
-        assert_eq!(match_hotkey_raw(KEY_D, SHIFT | CTRL), Some(Hotkey::Paste));
-        assert_eq!(match_hotkey_raw(KEY_S, SHIFT), None);
-        assert_eq!(match_hotkey_raw(KEY_D, SHIFT), None);
+        assert_eq!(
+            match_hotkey_raw(KEY_S, SHIFT_M | CTRL_M),
+            Some(Hotkey::Execute)
+        );
+        assert_eq!(
+            match_hotkey_raw(KEY_D, SHIFT_M | CTRL_M),
+            Some(Hotkey::Paste)
+        );
+        assert_eq!(match_hotkey_raw(KEY_S, SHIFT_M), None);
+        assert_eq!(match_hotkey_raw(KEY_D, SHIFT_M), None);
     }
 
     /// **不认 Command** —— ⌘S 是「保存」、⌘D 是「书签」,不能抢。
     #[test]
     fn 不认Command() {
-        assert_eq!(match_hotkey_raw(KEY_S, CMD), None);
-        assert_eq!(match_hotkey_raw(KEY_D, CMD), None);
-        assert_eq!(match_hotkey_raw(KEY_S, CMD | SHIFT), None);
+        assert_eq!(match_hotkey_raw(KEY_S, CMD_M), None);
+        assert_eq!(match_hotkey_raw(KEY_D, CMD_M), None);
+        assert_eq!(match_hotkey_raw(KEY_S, CMD_M | SHIFT_M), None);
     }
 
     /// 一个修饰键都没有 ⇒ 不算。
@@ -643,8 +684,8 @@ mod tests {
     /// **别让它漏出去**(见 `swallow`)。
     #[test]
     fn 没有修饰键的不算快捷键() {
-        assert_eq!(match_hotkey_raw(KEY_S, CGEventFlags::empty()), None);
-        assert_eq!(match_hotkey_raw(KEY_D, CGEventFlags::empty()), None);
+        assert_eq!(match_hotkey_raw(KEY_S, 0), None);
+        assert_eq!(match_hotkey_raw(KEY_D, 0), None);
     }
 
     /// 不是 S / D 的键一律不算(哪怕 Control 在位)。
@@ -652,7 +693,7 @@ mod tests {
     fn 别的键不算快捷键() {
         for keycode in [0i64, 8, 36, 49] {
             assert_eq!(
-                match_hotkey_raw(keycode, CTRL),
+                match_hotkey_raw(keycode, CTRL_M),
                 None,
                 "键码 {} 不该被当成快捷键",
                 keycode
@@ -726,18 +767,18 @@ mod tests {
         let pressed = vec![(KEY_S, now)];
         // 还没补上 Control ⇒ 认不出来
         assert_eq!(
-            find_pending_hotkey(&pressed, CGEventFlags::empty(), now, RECOGNIZE_WINDOW),
+            find_pending_hotkey(&pressed, 0, now, RECOGNIZE_WINDOW),
             None
         );
         // 补上 Control ⇒ 认出来了
         assert_eq!(
-            find_pending_hotkey(&pressed, CTRL, now, RECOGNIZE_WINDOW),
+            find_pending_hotkey(&pressed, CTRL_M, now, RECOGNIZE_WINDOW),
             Some((KEY_S, Hotkey::Execute))
         );
-        // D 同理
+        // D 同理(⌃⇧D:Control 之外还要 Shift)
         let pressed_d = vec![(KEY_D, now)];
         assert_eq!(
-            find_pending_hotkey(&pressed_d, CTRL, now, RECOGNIZE_WINDOW),
+            find_pending_hotkey(&pressed_d, SHIFT_M | CTRL_M, now, RECOGNIZE_WINDOW),
             Some((KEY_D, Hotkey::Paste))
         );
     }
@@ -750,7 +791,7 @@ mod tests {
         let pressed = vec![(KEY_S, old)];
         let later = old + RECOGNIZE_WINDOW + Duration::from_millis(1);
         assert_eq!(
-            find_pending_hotkey(&pressed, CTRL, later, RECOGNIZE_WINDOW),
+            find_pending_hotkey(&pressed, CTRL_M, later, RECOGNIZE_WINDOW),
             None
         );
     }

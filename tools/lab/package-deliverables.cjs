@@ -173,7 +173,7 @@ function zipMac(apps, target) {
         '2) 把想要的那个 .app 拖进「应用程序」文件夹',
         '3) 双击启动(首次打开若提示「无法验证开发者」,右键点它 → 「打开」→ 再点「打开」)',
         '',
-        '4) 给「辅助功能」授权(**默认执行 ⌃S / 回放 / 剪贴板直输 ⌃D 都靠它**):',
+        '4) 给「辅助功能」授权(**默认执行 ⌃S / 回放 / 剪贴板直输 ⌃⇧D 都靠它**):',
         '   系统设置 → 隐私与安全性 → 辅助功能 → 找到刚放进去的那个 App,打开开关',
         '   · 两个版本是**两个独立程序**,要**各授权一次**;',
         '   · App 启动时也会弹系统授权框,点「好」即可;',
@@ -199,6 +199,91 @@ function zipMac(apps, target) {
   }
 }
 
+/**
+ * 确保 Chromium 扩展(复制修复)已经构建好,返回产物目录。
+ *
+ * ## 为什么 Windows 包里要带它
+ *
+ * 用户 2026-10-25 原话:「在windows上那个把密文转化成明文的那个功能是失效的,
+ * 没有用的」。查下来的根因不是"没写" —— `apps/chromium-extension/`
+ * (MV3、自带 10.2MB 字形库、独立可运行)在两个仓库里都存在 ——
+ * 是**两个 Windows 安装包里都没有它** ⇒ 那条能力在 Windows 上实际等于零。
+ *
+ * 桌面程序**接管不了浏览器**(Windows 上没有 Safari、没有 Apple Events,
+ * 也没有能改写网页剪贴板事件的页面守卫通道)⇒ 正解是让用户把扩展装进
+ * Chrome/Edge。扩展是**独立可运行**的,不依赖桌面程序。
+ *
+ * ## 产物从哪来
+ *
+ * `node tools/build.mjs chromium` → `dist-core/chromium/`。
+ * 它要 `vendor/glyph-db-48.crdb.gz`(参考字形库):
+ *   - 优先用 vendor/ 里那份;
+ *   - 没有就**从仓库里已入库的那份拷过来**
+ *     (`tauri-app/src-tauri/resources/glyph-db-48.crdb.gz`,与 vendor 那份
+ *     **逐字节相同** —— 已比对过);
+ *   - 再没有才现场重建(要 5 秒以上,且依赖参考字体)。
+ */
+function ensureChromiumExtension() {
+  const out = path.join(TAURI_REPO, 'dist-core', 'chromium');
+  const manifest = path.join(out, 'manifest.json');
+  if (fs.existsSync(manifest)) return out;
+
+  const vendorDb = path.join(TAURI_REPO, 'vendor', 'glyph-db-48.crdb.gz');
+  if (!fs.existsSync(vendorDb)) {
+    const shipped = path.join(TAURI_REPO, 'tauri-app', 'src-tauri', 'resources', 'glyph-db-48.crdb.gz');
+    if (fs.existsSync(shipped)) {
+      fs.mkdirSync(path.dirname(vendorDb), { recursive: true });
+      fs.copyFileSync(shipped, vendorDb);
+      console.log('  字形库:用仓库里已入库的那份');
+    } else {
+      console.log('  字形库:就地重建(约 5 秒)…');
+      sh('node', ['tools/build-vendor.mjs'], { cwd: TAURI_REPO, stdio: 'inherit' });
+    }
+  }
+  console.log('  构建 Chromium 扩展…');
+  sh('node', ['tools/build.mjs', 'chromium'], { cwd: TAURI_REPO, stdio: 'inherit' });
+  if (!fs.existsSync(manifest)) {
+    console.error('✖ Chromium 扩展构建失败 ⇒ **不出包**');
+    process.exit(1);
+  }
+  return out;
+}
+
+/**
+ * 把扩展目录整个拷进暂存目录(Chrome 要的就是"一个文件夹",
+ * 里面顶层有 manifest.json)。
+ */
+function copyExtension(srcDir, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    const from = path.join(srcDir, entry.name);
+    const to = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      fs.cpSync(from, to, { recursive: true });
+    } else {
+      fs.copyFileSync(from, to);
+    }
+  }
+}
+
+/** 扩展目录必须自洽:少了 manifest 就装不进 Chrome,少了字形库就静默失能 */
+function checkExtensionDir(dir) {
+  const need = [
+    ['manifest.json', '扩展清单(Chrome 靠它认这是一个扩展)'],
+    ['background.js', '后台脚本(字形匹配与还原在这里)'],
+    ['content-main.js', '主世界护栏(拦网页自己改写复制事件)'],
+    ['content-isolated.js', '隔离世界脚本'],
+    [path.join('assets', 'glyph-db.crdb.gz'), '字形参考库(缺了扩展会静默失能)'],
+  ];
+  const missing = need.filter(([rel]) => !fs.existsSync(path.join(dir, rel)));
+  if (missing.length) {
+    console.error('✖ 浏览器扩展产物不齐 ⇒ **不出包**:');
+    for (const [rel, what] of missing) console.error(`    - ${rel}(${what})`);
+    process.exit(1);
+  }
+  console.log(`  ✔ 浏览器扩展产物齐全(${need.length} 项)`);
+}
+
 function zipWin(exes, target) {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'simuinput-win-'));
   try {
@@ -207,6 +292,15 @@ function zipWin(exes, target) {
       fs.copyFileSync(e.path, path.join(stage, e.name));
       names.push(e.name);
     }
+
+    // 浏览器修复扩展:放进包根的 browser-extension/ 文件夹
+    // (文件夹名用 ASCII —— 中文名在 Windows 资源管理器里可能显示成问号)
+    const extSrc = ensureChromiumExtension();
+    const extDest = path.join(stage, 'browser-extension');
+    copyExtension(extSrc, extDest);
+    checkExtensionDir(extDest);
+    names.push('browser-extension');
+
     fs.writeFileSync(
       path.join(stage, 'README-Install.txt'),
       [
@@ -220,8 +314,28 @@ function zipWin(exes, target) {
         '1) 双击对应的 .exe 开始安装(NSIS 一键安装,无需管理员权限)',
         '2) 安装完成后从桌面/开始菜单启动「模拟输入」',
         '',
+        '【浏览器修复:把密文还原成明文】—— Windows 上由浏览器扩展提供',
+        '',
+        '  桌面程序**接管不了浏览器**(Windows 上没有 Safari、没有 Apple Events),',
+        '  所以这个功能在 Windows 上是一个 **Chrome / Edge 扩展**:',
+        '  文件夹名就是本目录下的 **browser-extension**(和两个安装程序放在一起)。',
+        '',
+        '  装一次就行(装完一直有效):',
+        '   1) 打开 Chrome 或 Edge',
+        '   2) 地址栏输入 chrome://extensions(Edge 是 edge://extensions)',
+        '   3) 右上角打开「开发者模式」',
+        '   4) 点「加载已解压的扩展程序」,选 **browser-extension** 这个文件夹',
+        '   5) 装好后,网页上复制出来的就是明文(不再是密文)',
+        '',
+        '  注意:Chrome 是**按路径**引用这个文件夹的 ⇒ 建议先把 browser-extension',
+        '  整个文件夹复制到一个固定位置(比如 C:\\模拟输入扩展\\),再从那个位置加载;',
+        '  否则把解压出来的目录删了,扩展就会失效。',
+        '',
+        '  只需要桌面程序、不需要浏览器修复 ⇒ 跳过这一步即可,其它功能不受影响。',
+        '',
         '说明:Safari 复制修复功能依赖 macOS 的 Safari + Apple Events,',
-        '      Windows 版不包含该功能(界面上不会出现该开关)。',
+        '      Windows 版不包含该功能(界面上不会出现该开关);',
+        '      Windows 上对应的是上面那个 Chrome / Edge 扩展。',
         '',
         '构建时间: ' + new Date().toLocaleString('zh-CN'),
       ].join('\n'),
@@ -415,6 +529,31 @@ function main() {
     for (const line of list.split('\n').filter((l) => l.trim() && !l.startsWith('-')).slice(0, 10)) {
       console.log('   ' + line.trim());
     }
+  }
+
+  // 5) **Windows 包必须真的带上浏览器扩展** —— 验不过就是"发出去一个没有
+  //    浏览器修复功能的包",而那正是这次要修的东西(用户 2026-10-25:
+  //    「在windows上那个把密文转化成明文的那个功能是失效的,没有用的」)。
+  //
+  //    这条断言是**对着 zip 内容**查的,不是对着暂存目录 —— 暂存目录里有、
+  //    zip 里没有,是打包环节漏掉的最常见形态。
+  {
+    const list = sh('unzip', ['-l', WIN_TARGET]);
+    const must = [
+      'browser-extension/manifest.json',
+      'browser-extension/background.js',
+      'browser-extension/content-main.js',
+      'browser-extension/content-isolated.js',
+      'browser-extension/assets/glyph-db.crdb.gz',
+      'README-Install.txt',
+    ];
+    const missing = must.filter((f) => !list.includes(f));
+    if (missing.length) {
+      console.error('\n✖ Windows 包缺东西 ⇒ 这次交付**不算完成**:');
+      for (const f of missing) console.error(`    - ${f}`);
+      process.exit(1);
+    }
+    console.log('\n✔ Windows 包含浏览器扩展(manifest + 三个脚本 + 字形库)与安装说明');
   }
 }
 

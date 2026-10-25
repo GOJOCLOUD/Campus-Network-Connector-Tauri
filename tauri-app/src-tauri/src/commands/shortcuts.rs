@@ -2,7 +2,7 @@
 //! `triggerDefaultExecute` / `triggerPinyinFromClipboard` **同口径**。
 //!
 //! - ⌃S:触发「默认执行」—— 回放选中的录制文件(没选中就回放名字最大的那个)
-//! - ⌃D:读剪贴板(或输入框里固定的那段文本)并逐字键入(只有 macOS 有输入源切换这套打法)
+//! - ⌃⇧D:读剪贴板(或输入框里固定的那段文本)并逐字键入(只有 macOS 有输入源切换这套打法)
 //!
 //! 走的是**后端**这条路,不是界面上那条:快捷键在界面没打开时也要能用。
 
@@ -200,7 +200,7 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// ⌃D:读剪贴板(或输入框里固定的那段文本)并逐字键入。
+/// ⌃⇧D:读剪贴板(或输入框里固定的那段文本)并逐字键入。
 ///
 /// 只有 macOS 有这套打法(要切输入源);Windows 那边是直接送 Unicode 字符,
 /// 没有等价物 —— 和 Electron 版一样,那边不注册这个快捷键。
@@ -223,7 +223,7 @@ pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
     };
     let text = text.trim().to_string();
     if text.is_empty() {
-        record_shortcut_hit("⌃D", "剪贴板是空的");
+        record_shortcut_hit("⌃⇧D", "剪贴板是空的");
         return Ok(());
     }
 
@@ -243,11 +243,11 @@ pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
 
     match crate::commands::native::send_text(text.clone()) {
         Ok(_) => {
-            record_shortcut_hit("⌃D", &format!("已键入 {} 个字符", text.chars().count()));
+            record_shortcut_hit("⌃⇧D", &format!("已键入 {} 个字符", text.chars().count()));
             Ok(())
         }
         Err(e) => {
-            record_shortcut_hit("⌃D", &format!("键入失败: {}", e));
+            record_shortcut_hit("⌃⇧D", &format!("键入失败: {}", e));
             Err(e)
         }
     }

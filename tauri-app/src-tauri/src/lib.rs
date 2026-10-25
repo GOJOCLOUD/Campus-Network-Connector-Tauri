@@ -37,7 +37,7 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "level": native_window_level(&app),
                 }),
             );
-            // 全局快捷键:注册成功没有(Electron 版有 ⌃S / ⌃D 两个)
+            // 全局快捷键:注册成功没有(Electron 版有 ⌃S / ⌃⇧D 两个)
             // macOS 是自己监听事件(见 native::hotkey),那边还有 tap 的状态;
             // 其它平台是系统的全局热键。
             #[cfg(target_os = "macos")]
@@ -468,7 +468,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        // 全局快捷键:⌃S 默认执行 / ⌃D 剪贴板直输(macOS)。
+        // 全局快捷键:⌃S 默认执行 / ⌃⇧D 剪贴板直输(macOS)。
         // 快捷键走的是**后端**这条路 —— 界面没打开时也要能用。
         .plugin(tauri_plugin_global_shortcut::Builder::new()
             .with_handler(|app, shortcut, event| {
@@ -750,15 +750,25 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
 /// 快捷键的组合键字符串。
 ///
 /// ⚠️ **必须写 `Control`,不能写 `CmdOrControl`**:
-/// Electron 版注册的是 `globalShortcut.register('Ctrl+S' / 'Ctrl+D')`
-/// —— 也就是 **⌃S / ⌃D**。
+/// Electron 版注册的是 `globalShortcut.register('Ctrl+S' / 'Ctrl+Shift+D')`
+/// —— 也就是 **⌃S / ⌃⇧D**。
 /// 而 `CmdOrControl` 在 macOS 上会被解析成 **⌘(Command)**(global-hotkey 的
 /// `CMDORCONTROL` 在 macOS 分支映射到 `Modifiers::SUPER`),
 /// 结果就是:系统里监听的是 ⌘D,用户按 ⌃D **什么都不会发生**。
 ///
 /// `Control` 在所有平台都是 Control,和 Electron 版完全同口径。
 const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+S";
-const SHORTCUT_PASTE: &str = "Control+D";
+/// **⌃⇧D**(2026-10-25 用户口径:「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」)。
+///
+/// 换键的原因:⌃D 在普通软件里常常是「**退出软件**」那一族动作,
+/// 抢它容易和别人打架(抢不到 ⇒ 快捷键直接失灵)。
+/// ⌃⇧D 几乎没人用 ⇒ 抢到的概率高得多。
+///
+/// ⚠️ 2026-10-23 用户曾要求「不要 Shift」(三根手指太别扭),
+/// **2026-10-25 改了口径**:三个键(⌃⇧D)一起按才算,
+/// 并且判定放宽成「在一定时间内按下即可、顺序不限」
+/// (见 `hotkey_core::StickyModifiers`)。
+const SHORTCUT_PASTE: &str = "Control+Shift+D";
 
 /// 把组合键字符串解析成插件的 Shortcut。
 fn parse_shortcut(key: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
@@ -776,7 +786,7 @@ mod shortcut_tests {
     use super::*;
     use tauri_plugin_global_shortcut::Modifiers;
 
-    /// 快捷键必须与 Electron 版**同口径**:⌃S / ⌃D(Control),不是 ⌘(Command)。
+    /// 快捷键必须与 Electron 版**同口径**:⌃S / ⌃⇧D(Control),不是 ⌘(Command)。
     ///
     /// 这条写死过:写成了 `CmdOrControl+Shift+D`,在 macOS 上被解析成 ⌘,
     /// 用户按(当时的)⌃⇧D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
@@ -795,12 +805,27 @@ mod shortcut_tests {
                 "{} 不能带 Command(⌘)—— macOS 上 CmdOrControl 就是 ⌘,和 Electron 版不一致",
                 key
             );
-            assert!(
-                !s.mods.contains(Modifiers::SHIFT),
-                "{} 不要再带 Shift —— 原来要「⌃⇧ + 字母」三根手指一起按,太别扭 \
-                 (2026-10-23 用户要求:「只要按住 Ctrl 再点一下字母」)",
-                key
-            );
         }
+    }
+
+    /// **⌃⇧D 必须带 Shift**(2026-10-25 用户口径:「直接 ctrl+shift+D 吧」),
+    /// 而 **⌃S 不带**(默认执行还是老样子)。
+    ///
+    /// 这条防的是「有人把 Shift 又去掉」—— 那会让 ⌃D 又变回
+    /// 「别的软件里的退出键」,抢键冲突的老问题原样回来。
+    #[test]
+    fn 剪贴板直入是Control加Shift() {
+        let paste = parse_shortcut(SHORTCUT_PASTE).unwrap();
+        assert!(
+            paste.mods.contains(Modifiers::SHIFT),
+            "⌃⇧D 必须带 Shift,实际 mods={:?}",
+            paste.mods
+        );
+        let execute = parse_shortcut(SHORTCUT_DEFAULT_EXECUTE).unwrap();
+        assert!(
+            !execute.mods.contains(Modifiers::SHIFT),
+            "⌃S(默认执行)不该带 Shift,实际 mods={:?}",
+            execute.mods
+        );
     }
 }
