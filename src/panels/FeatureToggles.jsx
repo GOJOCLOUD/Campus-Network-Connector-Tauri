@@ -41,6 +41,12 @@ export default function FeatureToggles({ featureList, featureStatus, onToggle })
             Safari 未运行 —— 打开 Safari 后会自动接管(本软件不会替你启动它)。
           </div>
         ) : null}
+        {/* 功能自带的提示(中性信息,不是错误)——
+            Windows 的「浏览器复制修复」用它说明「重启浏览器后生效」。
+            没有 hint 就不渲染 ⇒ mac 侧界面一个字都不变。 */}
+        {st && st.hint ? (
+          <div className="mt-1.5 text-xs text-gray-600">{st.hint}</div>
+        ) : null}
         {err ? (
           <div className="mt-1.5 text-xs text-red-700 break-words">
             失败原因:{err}

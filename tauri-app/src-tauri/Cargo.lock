@@ -3446,6 +3446,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 name = "simuinput-tauri"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "core-foundation",
  "core-foundation-sys",
  "core-graphics 0.24.0",

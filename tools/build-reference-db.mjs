@@ -7,16 +7,39 @@
  * 用法：
  *   node tools/build-reference-db.mjs [--font <path>] [--out <path>] [--size 32] [--coarse 8]
  */
-import { readFileSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import opentype from 'opentype.js';
-
-import { buildGlyphDb } from '../packages/core/src/glyph-matching/db.ts';
-import { flattenPath, rasterizeContours } from '../packages/core/src/glyph-matching/raster.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
+
+/**
+ * 加载 packages/core 里的 TypeScript 模块。
+ *
+ * Node 直接 `import './xxx.ts'` 需要 22.6+ 并且默认开类型剥离,
+ * 而 CI 上跑的是 Node 20 → 报 ERR_UNKNOWN_FILE_EXTENSION，参考库就地重建直接失败
+ * （macOS 的 CI 就是这么挂的）。这里用仓库里已有的 esbuild 先转成一份临时 JS 再 import，
+ * 任何 Node 版本都能跑。
+ */
+async function loadTsModule(entry) {
+  const { build } = await import('esbuild');
+  const result = await build({
+    entryPoints: [entry],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    target: 'node18',
+    write: false,
+    logLevel: 'silent',
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'crdb-'));
+  const file = join(dir, 'bundle.mjs');
+  writeFileSync(file, result.outputFiles[0].text);
+  return import(pathToFileURL(file).href);
+}
 
 function arg(name, fallback) {
   const index = process.argv.indexOf(`--${name}`);
@@ -69,12 +92,20 @@ export function buildCharset() {
   return [...chars].sort((a, b) => a - b);
 }
 
-function main() {
+async function main() {
   const fontPath = resolve(arg('font', resolve(root, 'tools/reference-fonts/NotoSansSC-Regular.otf')));
-  const size = Number(arg('size', '32'));
+  const size = Number(arg('size', '48'));
   // 默认产物名带栅格尺寸，避免出现"48×48 的库却叫 glyph-db.crdb"
   const outPath = resolve(arg('out', resolve(root, `tools/reference-fonts/glyph-db-${size}.crdb`)));
   const coarse = Number(arg('coarse', '8'));
+
+  // 算法核心是 TypeScript → 走 esbuild 转一道再加载（见 loadTsModule 的说明）
+  const { buildGlyphDb } = await loadTsModule(
+    resolve(root, 'packages/core/src/glyph-matching/db.ts'),
+  );
+  const { flattenPath, rasterizeContours } = await loadTsModule(
+    resolve(root, 'packages/core/src/glyph-matching/raster.ts'),
+  );
 
   console.log(`[db] font   = ${fontPath}`);
   console.log(`[db] grid   = ${size}x${size}, coarse = ${coarse}x${coarse}`);
@@ -127,5 +158,8 @@ function main() {
 }
 
 if (process.argv[1] && process.argv[1].endsWith('build-reference-db.mjs')) {
-  main();
+  main().catch((error) => {
+    console.error('[db] 构建失败:', error && error.message ? error.message : error);
+    process.exit(1);
+  });
 }

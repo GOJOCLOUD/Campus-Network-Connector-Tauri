@@ -18,37 +18,6 @@ const isMac = cnc.platform === 'darwin';
 // 不需要输入源切换,功能不缺。
 const isWindows = cnc.platform === 'win32';
 
-/**
- * **Windows 线:浏览器修复(复制修复)由 Chrome / Edge 扩展提供。**
- *
- * mac 上这个能力是**原生**的(Apple Events 驱动 Safari),界面上是一个**开关**,
- * 一拨就接管;Windows 上没有 Safari、没有 Apple Events,桌面程序**接管不了浏览器**
- * ⇒ 那个能力只能由**扩展**提供,而扩展装不装、装在哪,桌面上**管不着**
- * ⇒ 给一个开关就是骗人。
- *
- * ⇒ 界面上给的是**说明块**:说清楚它由谁提供、去哪拿、怎么装。
- *   位置与 mac 的「Safari 复制修复」开关**完全相同**(这一页的最上面)。
- *
- * 用户 2026-10-25 原话:「在windows上那个把密文转化成明文的那个功能是失效的,
- * 没有用的」「最后个页面的相关提示也和macOS上面的两个版本完全不同」。
- */
-const BROWSER_REPAIR_NOTE = {
-  title: '浏览器修复(复制修复)',
-  body: [
-    '把被网页字体混淆的文字还原成你看到的那句话 —— 网页上复制出来是明文,不是密文。',
-    '',
-    'Windows 上这个功能由 Chrome / Edge 扩展提供(桌面程序接管不了浏览器)。',
-    '',
-    '装一次(装完一直有效):',
-    '1) 打开 Chrome 或 Edge,地址栏输入 chrome://extensions(Edge 是 edge://extensions)',
-    '2) 右上角打开「开发者模式」',
-    '3) 点「加载已解压的扩展程序」,选 browser-extension 文件夹',
-    '   (它在安装包解压出来的目录里,和两个安装程序放在一起)',
-    '',
-    '提示:Chrome 按路径引用这个文件夹 ⇒ 建议先把它复制到一个固定位置再加载。',
-  ].join('\n'),
-};
-
 function App() {
   const [name, setName] = useState('')
   const [isRecording, setIsRecording] = useState(false)
@@ -642,9 +611,6 @@ function App() {
     featureList,
     featureStatus,
     onToggleFeature: toggleFeature,
-    // Windows 线:浏览器修复的**说明块**(不是开关 —— 桌面程序接管不了浏览器,
-    // 那个能力由 Chrome/Edge 扩展提供)。位置与 mac 的「Safari 复制修复」开关相同。
-    browserRepairNote: isWindows ? BROWSER_REPAIR_NOTE : null,
     // 「辅助功能」授权状态:不做成占一整条的大横幅,只在第 4 页放一个小问号
     // (红=还不能用,绿=可以用),点一下直接跳到系统设置。
     // **只有 macOS 有「辅助功能」这回事**(Windows 的 SendInput 不需要授权),

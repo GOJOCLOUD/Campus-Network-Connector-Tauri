@@ -7,6 +7,7 @@
 //! 用 `tauri-app/verify-engine.sh` 对拍验证过：与 TS 引擎映射表逐条一致。
 
 pub mod commands;
+pub mod chromium;
 pub mod glyph;
 pub mod safari;
 
@@ -724,6 +725,19 @@ pub fn run() {
             // Windows:装**托盘图标** —— 窗口被隐藏之后靠它叫回来 / 彻底退出。
             #[cfg(target_os = "windows")]
             setup_tray(app.handle());
+            // Windows:「浏览器复制修复」开关是**落盘**的 ⇒ 启动时要把注册表那两把键
+            // **重新写一遍**。
+            //
+            // 为什么每次启动都要写：注册表里的 `path` 指向安装目录里的扩展 ——
+            // 用户把程序挪了位置（或换了机器重新装），那把键就指着旧路径 ⇒
+            // 浏览器启动时找不到扩展 ⇒ 开关显示"已开启"但什么都没发生。
+            // 每次启动重写一次 = 自愈，不用用户做任何事。
+            #[cfg(target_os = "windows")]
+            {
+                if appcmd::feature_enabled(app.handle(), "chromium-repair") {
+                    let _ = appcmd::reapply_chromium_repair(app.handle());
+                }
+            }
             // 录制用的「排除矩形」必须**跟着窗口走**。
             //
             // 「点自己界面上的按钮不算一次点击」靠它实现:落在自己窗口范围内的

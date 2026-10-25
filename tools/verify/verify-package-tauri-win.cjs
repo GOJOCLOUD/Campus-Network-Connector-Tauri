@@ -123,6 +123,50 @@ if (fs.existsSync(srcDb) && dbFiles.length) {
   }
 }
 
+// ③' 浏览器修复扩展:必须进了产物目录
+//
+// Windows 的浏览器复制修复靠**扩展**:桌面程序把它注册进 Chrome/Edge 的
+// 外部扩展清单(HKCU)⇒ 扩展文件必须跟着安装包一起到电脑上。
+// 少了它 ⇒ 开关会如实报「安装包里找不到浏览器修复扩展」。
+//
+// **不猜它被放在哪**:在 target/release 下面递归找 ——
+// 不同 Tauri 版本把它放 exe 旁边还是 resources/ 下未必一样。
+{
+  const EXT_SKIP = new Set(['deps', 'build', 'incremental', '.fingerprint', '.cargo-lock']);
+  function findExtensionDirs(dir, depth, out) {
+    if (depth > 4 || !fs.existsSync(dir)) return out;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return out; }
+    for (const e of entries) {
+      if (EXT_SKIP.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (fs.existsSync(path.join(full, 'manifest.json'))) out.push(full);
+        findExtensionDirs(full, depth + 1, out);
+      }
+    }
+    return out;
+  }
+  const extDirs = findExtensionDirs(TARGET, 0, []);
+  check('产物目录里有浏览器修复扩展', extDirs.length > 0,
+    extDirs.length ? extDirs.map((p) => path.relative(TARGET, p)).join(', ') : '(在 ' + TARGET + ' 下面没找到)');
+  for (const dir of extDirs) {
+    const manifestPath = path.join(dir, 'manifest.json');
+    let manifest = null;
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch (_) {}
+    check('扩展 manifest 带 key(扩展 ID 由它决定)', !!(manifest && manifest.key));
+    for (const f of ['background.js', 'content-main.js', 'content-isolated.js']) {
+      const p = path.join(dir, f);
+      const size = fs.existsSync(p) ? fs.statSync(p).size : 0;
+      check(`扩展脚本 ${f} 在且不是空壳`, size > 1024, `${size} 字节`);
+    }
+    const db = path.join(dir, 'assets', 'glyph-db.crdb.gz');
+    const dbSize = fs.existsSync(db) ? fs.statSync(db).size : 0;
+    check('扩展自带字形库(没有它还原不出明文)', dbSize > 5 * 1024 * 1024,
+      `${(dbSize / 1024 / 1024).toFixed(1)} MB`);
+  }
+}
+
 // ④ 前端产物完整:index.html 引用的资源都在
 const indexHtml = path.join(DIST, 'index.html');
 check('前端产物 index.html 在', fs.existsSync(indexHtml), indexHtml);

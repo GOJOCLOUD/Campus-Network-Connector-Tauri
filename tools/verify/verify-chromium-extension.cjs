@@ -85,3 +85,35 @@ test('字形参考库在包里,而且能解开(坏 gzip ⇒ 扩展静默失能)'
   const plain = zlib.gunzipSync(raw);
   assert.ok(plain.length > raw.length, '解开后的体积应该更大');
 });
+
+test('字形渲染必须在页面主世界做(隔离世界拿不到页面的 @font-face)', () => {
+  // 2026-10-25 实测:扩展的**隔离世界**里 `document.fonts` 是空的,
+  // canvas 画出来的是回退字体 => 判定「这个作用域没被混淆」
+  // => **永远不还原**(e2e 用例 6 个挂 4 个,复制出来还是密文)。
+  //
+  // => 渲染必须搬到页面主世界(那边才有页面的 @font-face),
+  // 隔离世界只负责「请求渲染 + 拿回结果」。
+  //
+  // 这条断言盯的就是**渲染发生在哪个世界** —— 改错了立刻红,
+  // 不用等 e2e(而且 e2e 在 Windows CI 上跑不了,见 ADR-0028)。
+  const main = fs.readFileSync(readOut('content-main.js'), 'utf8');
+  const isolated = fs.readFileSync(readOut('content-isolated.js'), 'utf8');
+
+  assert.ok(
+    main.includes('copy-repair:render-request'),
+    '主世界脚本没装字形渲染服务(它才是有页面字体的那一边)',
+  );
+  assert.ok(
+    /new\s+GlyphRenderer/.test(main),
+    '主世界脚本里没有渲染器 —— 渲染服务没装上',
+  );
+  assert.ok(
+    isolated.includes('copy-repair:render-request'),
+    '隔离世界脚本没走主世界渲染桥',
+  );
+  assert.ok(
+    !/new\s+GlyphRenderer/.test(isolated),
+    '隔离世界脚本**自己在渲染** —— 那里拿不到页面的 @font-face,'
+      + '画出来的是回退字体 => 永远判不出混淆 => 复制出来还是密文',
+  );
+});

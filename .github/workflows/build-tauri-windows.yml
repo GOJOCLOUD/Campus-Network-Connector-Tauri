@@ -73,6 +73,20 @@ jobs:
           npm run build:extension
           node --test tools/verify/verify-chromium-extension.cjs
 
+      # 硬门禁:共享代码的两条不变量(跑不过就不发包)。
+      #
+      # ① 字形渲染的**栅格尺寸**必须与参考字形库一致 ——
+      #    不一致 ⇒ 送进匹配器的位图与库里的字形**错位** ⇒ 最近邻全是噪声
+      #    (实测落到「爫」「﹊」这类符号上,margin≈0)⇒ 永远判不出混淆
+      #    ⇒ 复制出来还是密文,**而且全程不报错**。
+      #    2026-10-25 实测踩过:渲染器 32×32、库 48×48。
+      #
+      # ② 扩展 ID 必须在 manifest / Rust / JS / 产物四处**算成同一个值** ——
+      #    算错 ⇒ 注册表写到一把**没人认的键**上 ⇒ 开关显示「已接管」,
+      #    浏览器里什么都没有(同样不报错)。
+      - name: Glyph grid + extension ID gates
+        run: node --test tools/verify/verify-glyph-grid.cjs tools/verify/verify-extension-id.cjs
+
       # 硬门禁:界面层的回归(跑不过就不发包)。
       # - 换页时内容区**底下**那条横向滚动条不许再出现
       #   (用户反馈「下面有个滑条在滑动」),画面横滑的动画不许丢;
