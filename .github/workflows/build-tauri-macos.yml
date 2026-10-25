@@ -72,6 +72,8 @@ jobs:
       # 这两条要读**构建出来的 dist/**(真正装进 App 的那份前端),
       # 所以必须放在 "Build frontend" 之后。
       - name: UI regression test
+        run: node --test tools/verify/verify-panel-transition.cjs tools/verify/verify-recording-ui.cjs
+
       # 硬门禁:浏览器修复扩展的**端到端**(跑不过就不发包)。
       #
       # 这是**唯一**能证明「网页上复制出来是明文」的用例 ——
@@ -90,7 +92,6 @@ jobs:
           node tools/build.mjs chromium
           node --test tools/verify/verify-chromium-extension.cjs
           npm run test:e2e
-        run: node --test tools/verify/verify-panel-transition.cjs tools/verify/verify-recording-ui.cjs
 
       # 硬门禁:平台界面自检(跑不过就不发包)。
       # 盯的是「该藏的步骤有没有真的藏起来」:
