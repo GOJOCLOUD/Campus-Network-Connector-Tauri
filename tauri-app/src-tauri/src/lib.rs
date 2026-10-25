@@ -49,18 +49,21 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
             let tap_state = nativecmd::hotkey_win::diagnostics();
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let tap_state = serde_json::Value::Null;
-            // Windows 线**不注册任何全局键**(2026-10-24 用户口径):
-            // ⌃D / ⌃S 都是 Windows 的系统默认键,抢过来会关掉用户自己开的软件。
-            // 这一栏明确写 false —— 免得看到 `registered: []` 以为是「注册失败」。
-            #[cfg(target_os = "windows")]
-            let global_shortcuts_enabled = false;
-            #[cfg(not(target_os = "windows"))]
+            // Windows 线**抢 ⌃D**(2026-10-25 用户口径):⌃D 在别的软件里是
+            // 「退出软件」那一族动作 ⇒ 我们抢到手,别的软件就**收不到**它,
+            // 那个软件也就不会被自己的「退出」关掉。
+            //
+            // 这一栏写 true。「**抢到了 / 没抢到**」要另外两样才分得清:
+            // ① 下面 `registered` 里有没有 `Control+D`;
+            // ② 原生状态里的 `shortcutPasteRegistered`(界面也用它显示提示)。
             let global_shortcuts_enabled = true;
             obj.insert(
                 "shortcuts".to_string(),
                 serde_json::json!({
                     "registered": registered_shortcuts(),
                     "globalShortcutsEnabled": global_shortcuts_enabled,
+                    // ⌃D **抢到了没有** —— 界面的提示行也靠它。
+                    "pasteRegistered": crate::shortcut_paste_registered(),
                     "defaultExecute": SHORTCUT_DEFAULT_EXECUTE,
                     "paste": SHORTCUT_PASTE,
                     "tap": tap_state,
@@ -561,7 +564,8 @@ fn setup_tray(app: &tauri::AppHandle) {
             "quit" => {
                 // 托盘菜单的「退出程序」= **彻底退出**。
                 // 窗口的 CloseRequested 被拦着(只隐藏、不退出),
-                // 所以这条菜单是**唯一**的彻底退出路径。
+                // 所以这条菜单是托盘上唯一的彻底退出路径
+                // (右上角还有「关闭软件」按钮,走的是 `window_quit`)。
                 app.exit(0);
             }
             _ => {}
@@ -802,7 +806,8 @@ pub fn run() {
                 //  挂着,功能依然生效」)。直接退进程等于把 app 关掉了,不是「收起来」。
                 //
                 // Windows 上窗口一藏,任务栏就没有图标了 ⇒ 靠**托盘图标**把窗口
-                // 叫回来;彻底退出走**托盘菜单的「退出程序」**。
+                // 叫回来;彻底退出有两个入口:右上角「关闭软件」按钮
+                // (`window_quit`)或托盘菜单的「退出程序」。
                 api.prevent_close();
                 let _ = window.hide();
             }

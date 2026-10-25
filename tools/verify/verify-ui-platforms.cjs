@@ -537,6 +537,13 @@ async function probeLayout(page) {
       );
       check('原生状态里有「shortcutPasteRegistered」这一栏(界面靠它显示提示)',
         /"shortcutPasteRegistered"/.test(appRs));
+      // 诊断(diag.json)的 `globalShortcutsEnabled` 在 Windows 上**必须是 true** ——
+      // 上一版还写着 false(那是「一个全局键都不占」那版留下的),
+      // 会让排查的人以为「按政策不注册」,而我们其实**抢了 ⌃D**。
+      check('诊断里 globalShortcutsEnabled 不是 false(Windows 现在有全局键)',
+        !/global_shortcuts_enabled\s*=\s*false/.test(libRs),
+        /global_shortcuts_enabled\s*=\s*(true|false)/.exec(libRs)
+          ? /global_shortcuts_enabled\s*=\s*(true|false)/.exec(libRs)[0] : '没找到 global_shortcuts_enabled');
     }
   } finally {
     await browser.close();
