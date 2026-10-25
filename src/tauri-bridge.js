@@ -403,10 +403,14 @@ function installTauriBridge() {
         }
         await new Promise((r) => setTimeout(r, 300));
       }
-      const wait = Math.max(0, Number(delaySeconds || 3)) * 1000;
+      // `??` 不是 `||`:**显式传 0 就是"不要等"**,不能被当成"没传"。
+      // (旧写法 `delaySeconds || 3` 把 0 当成假值 ⇒ 明明要立刻键入,却等了 3 秒;
+      //  Electron 那边是 `if (delaySeconds > 0)` ⇒ 传 0 就是立刻。
+      //  两边因此对"立刻键入"的处理不一致,这里按 Electron 的口径改成 `??`。)
+      const wait = Math.max(0, Number(delaySeconds ?? 3)) * 1000;
       await new Promise((r) => setTimeout(r, wait));
       await invoke('send_text', { text: value });
-      return { status: 'success', message: `将在 ${delaySeconds || 3} 秒后开始输入` };
+      return { status: 'success', message: `将在 ${delaySeconds ?? 3} 秒后开始输入` };
     },
 
     // Settings
