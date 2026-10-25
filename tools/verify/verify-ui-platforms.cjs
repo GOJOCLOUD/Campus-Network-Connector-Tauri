@@ -52,8 +52,18 @@ function serveDist() {
 }
 
 /** 造一个够用的 window.cnc 桩 */
-function stub(platform, accessibilityTrusted = false, nativeStatus = null) {
+function stub(platform, accessibilityTrusted = false, nativeStatus = null, features = []) {
   const status = nativeStatus || { ok: true, platform, accessibilityTrusted };
+  // 功能清单:Windows 线上是「浏览器复制修复」(与 mac 的「Safari 复制修复」同一个组件)。
+  // 先在**函数里**序列化成 JSON,再插进下面那个模板字符串(模板里再拼字符串很容易出错)。
+  const featureListJson = JSON.stringify(features);
+  const featureStatusJson = JSON.stringify(Object.fromEntries(features.map((f) => [f.prefix, {
+    enabled: true,
+    supported: true,
+    injected: true,
+    hint: '已注册到 Chrome、Edge,下次打开浏览器即生效。',
+    lastError: '',
+  }])));
   return `(function () {
     // 窗口动作的**调用记录**:用来断言右上角那四个按钮各自调了什么
     // (「关闭软件」= quit 一次点击真退出;「放到后台」= hide 进程留着)。
@@ -67,8 +77,8 @@ function stub(platform, accessibilityTrusted = false, nativeStatus = null) {
       maximize() { window.__winCalls.push('maximize'); },
       hide() { window.__winCalls.push('hide'); },
       clipboardReadText: async () => '来自剪贴板的文字',
-      getFeatures: async () => [],
-      getFeatureStatus: async () => null,
+      getFeatures: async () => ${featureListJson},
+      getFeatureStatus: async (prefix) => (${featureStatusJson})[prefix] || null,
       setFeatureEnabled() {}, setFeatureEnabledSetting() {},
       getNativeStatus: async () => (${JSON.stringify(status)}),
       getActivationSnapshot: async () => ({
@@ -562,32 +572,39 @@ async function probeLayout(page) {
           ? /global_shortcuts_enabled\s*=\s*(true|false)/.exec(libRs)[0] : '没找到 global_shortcuts_enabled');
     }
 
-    // ── 最后一页必须有**浏览器修复的说明块**(Windows 线)──
+    // ── 最后一页必须有**「浏览器复制修复」开关**(Windows 线)──
     //
-    // 用户 2026-10-25:「在windows上那个把密文转化成明文的那个功能是失效的,
-    // 没有用的」「最后个页面的相关提示也和macOS上面的两个版本完全不同」。
+    // 2026-10-25 用户原话:「Windows上我要和Mac一样的工作方式,
+    // 你别搞什么这种搞扩展这么复杂的操作,越简单越好,你为什么不照搬,还搞这么特殊的」
     //
-    // Windows 上的浏览器修复由 **Chrome/Edge 扩展**提供(桌面程序接管不了浏览器),
-    // 所以界面上给的是**说明块**而不是开关 —— 但**必须有**,
-    // 否则用户根本不知道这个功能在哪、怎么用 ⇒ 等于没有。
+    // ⇒ 上一版给的**说明块**(让用户自己去 chrome://extensions「加载已解压的扩展程序」)
+    //   作废:现在是**和 mac 同一个位置、同一个组件**的开关
+    //   (桌面程序自己把扩展注册进浏览器 ⇒ 用户不用碰扩展本身)。
     {
       const page = await browser.newPage();
       await page.evaluateOnNewDocument(stub('win32', false, {
         ok: true, platform: 'win32', shortcutPasteRegistered: true,
-      }));
+      }, [{
+        id: 'chromium-repair',
+        title: '浏览器复制修复',
+        description: '把被网页字体混淆的文字还原成你看到的那句话',
+        prefix: 'chromiumRepair',
+      }]));
       await page.goto(base, { waitUntil: 'networkidle0' });
       await new Promise((r) => setTimeout(r, 600));
       await gotoStep(page, 1);
       const last = await probe(page);
-      check('Windows 最后一页有「浏览器修复(复制修复)」说明块',
-        last.text.includes('浏览器修复') && last.text.includes('复制修复'),
-        last.text.includes('浏览器修复') ? '' : last.text.slice(0, 200));
-      check('说明块说清楚了它由 Chrome / Edge 扩展提供',
-        /Chrome\s*\/\s*Edge|chrome:\/\/extensions/.test(last.text), '');
-      check('说明块给出了加载扩展的入口(chrome://extensions)',
-        last.text.includes('chrome://extensions'), '');
-      check('说明块告诉了用户扩展文件夹在哪儿(browser-extension)',
-        last.text.includes('browser-extension'), '');
+      check('Windows 最后一页有「浏览器复制修复」开关',
+        last.text.includes('浏览器复制修复'),
+        last.text.includes('浏览器复制修复') ? '' : last.text.slice(0, 200));
+      check('它是**真开关**(有「开启/关闭」按钮,不是一段说明书)',
+        /开启|关闭/.test(last.text), '');
+      // 说明书那一套必须**没有**了 —— 用户原话否掉的就是它。
+      check('Windows 最后一页**没有**「自己去装扩展」那套说明书',
+        !last.text.includes('chrome://extensions')
+        && !last.text.includes('开发者模式')
+        && !last.text.includes('加载已解压')
+        && !last.text.includes('browser-extension'), '');
       // **不该**出现 mac 的「Safari 复制修复」开关(Windows 上没有 Safari)。
       check('Windows 最后一页**没有** mac 的「Safari 复制修复」开关',
         !last.text.includes('Safari 复制修复'), '');
