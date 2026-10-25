@@ -23,14 +23,25 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
   const pending: Array<{ groups: any[] }> = [];
   const unrepaired: Array<{ text: string; scopeKey: string; at: number }> = [];
 
+  /**
+   * 队列上限。
+   *
+   * 为什么需要：App 还没确认过的作用域**每一轮都会重报**（这样 App 丢了一次
+   * 也能很快补上），而 App 不取走时（App 没开 / 卡住）这个数组只进不出。
+   * 不设上限就会在页面里无限涨。
+   */
+  const MAX_QUEUE = 64;
+
   const bridge = {
     pending,
     unrepaired,
     report(kind: 'pending' | 'unrepaired', payload: any, frame: Window) {
       if (kind === 'pending') {
         pending.push({ groups: payload.groups });
+        if (pending.length > MAX_QUEUE) pending.splice(0, pending.length - MAX_QUEUE);
       } else {
         unrepaired.push(payload);
+        if (unrepaired.length > MAX_QUEUE) unrepaired.splice(0, unrepaired.length - MAX_QUEUE);
       }
     },
     /**
@@ -78,7 +89,7 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
           /* 跨源 frame 忽略 */
         }
       }
-      return { pending: collected, unrepaired: collectedUnrepaired };
+      return { pending: dedupeByScope(collected), unrepaired: collectedUnrepaired };
     },
     /** 把映射分发到所有 frame（顶层自己也设一份） */
     setMapping(scopeKey: string, mapping: Record<string, string>) {
@@ -98,6 +109,45 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
           const api = (frame as any).__copyRepairSetMapping;
           if (typeof api === 'function') {
             api(scopeKey, mapping);
+            count += 1;
+          }
+        } catch (_) {
+          /* 跨源 frame 忽略 */
+        }
+      }
+      return count;
+    },
+    /**
+     * 让**所有 frame（含顶层）**把已知的作用域重新报一遍。
+     *
+     * ## 为什么必须广播到 frame
+     *
+     * 真正带混淆字体的往往是**嵌套 frame**（学习通是第 3~4 层），
+     * 每一层各有各的守卫、各自的账本。只喊顶层等于没喊 ——
+     * 顶层通常压根没有自定义字体，它那边清账本没有任何效果。
+     *
+     * ## 为什么要"重新报"
+     *
+     * 守卫"App 已经送达到就不上报"这条规则是按**页面里的账本**算的，
+     * 而 App 是另一个进程：App 重启后自己手里是空的，
+     * 页面却还留着上一任 App 下发的映射 → 守卫觉得"不用报" →
+     * App 永远学不到这个作用域 → 不登记这个标签 → **快通道是瞎的** →
+     * 换题后只能等主通道那一圈（~1.2 秒）→ 用户"换题立刻复制"复制出密文。
+     *
+     * 重报**不会**清掉页面上的映射（那本账是"页面能不能修复复制"），
+     * 所以这段时间里用户复制照样拿到明文。
+     */
+    resync() {
+      // 先重扫：新 frame 可能还没进名单（站点换题会重建 iframe）。
+      scan();
+      let count = 0;
+      const all = framesInjected.slice();
+      all.push(window as unknown as Window);
+      for (const frame of all) {
+        try {
+          const api = (frame as any).__copyRepairResync;
+          if (typeof api === 'function') {
+            api();
             count += 1;
           }
         } catch (_) {
@@ -133,6 +183,33 @@ export function installFrameBridge(options: FrameBridgeOptions): string {
   };
 
   const framesInjected: Window[] = [];
+
+  /**
+   * 同一批作用域可能**从两条路**进到队列里：
+   *   1. 守卫自己上报到 bridge 的 pending 数组（reportToTop）
+   *   2. 守卫自己把分组挂在 `state.pending` 上（take() 里再收一次）
+   * 两条路都收 → 主进程会把**同一个作用域处理两遍**：
+   * 重新建一次映射、下发一次（一次 Apple Event ≈110ms）。
+   * 实测一轮 330ms 里有 220ms 花在重复下发上。
+   *
+   * 作用域 key 里带了字体内容指纹，所以同一个 key 就是**同一份映射**，
+   * 去重不会丢信息（下发是广播给所有 frame 的，发一次就够）。
+   */
+  function dedupeByScope(items: Array<{ groups: any[] }>): Array<{ groups: any[] }> {
+    const seen = new Set<string>();
+    const out: Array<{ groups: any[] }> = [];
+    for (const item of items) {
+      const groups = (item && item.groups) || [];
+      const fresh = groups.filter((g: any) => {
+        const key = g && g.scopeKey;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (fresh.length > 0) out.push({ groups: fresh });
+    }
+    return out;
+  }
 
   function injectInto(frameWin: Window | null): void {
     if (!frameWin || frameWin === window) return;

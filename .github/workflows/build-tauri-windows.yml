@@ -48,6 +48,31 @@ jobs:
       - name: page-guard regression test
         run: node --test tools/verify/verify-page-guard.cjs
 
+      # 硬门禁:浏览器修复扩展(复制修复)必须能构建出来(跑不过就不发包)。
+      #
+      # 2026-10-25 用户反馈:「在windows上那个把密文转化成明文的那个功能是失效的,
+      # 没有用的」—— 根因不是"没写":apps/chromium-extension/(MV3、自带字形库、
+      # 独立可运行)一直都在仓库里,是**两个 Windows 安装包里都没有它**
+      # ⇒ 那条能力在 Windows 上实际等于零。
+      #
+      # 桌面程序**接管不了浏览器**(Windows 上没有 Safari、没有 Apple Events,
+      # 没有能改写网页剪贴板事件的页面守卫通道)⇒ Windows 上的浏览器修复
+      # **就是这个扩展**:用户把它装进 Chrome/Edge,网页上复制出来才是明文。
+      #
+      # 字形库直接用**仓库里已入库的那份**
+      # (tauri-app/src-tauri/resources/glyph-db-48.crdb.gz,与 vendor 那份
+      #  逐字节相同)—— 不用现场重建:重建要栅格化 GBK 全集,慢且没必要。
+      #
+      # 这条门禁盯的是**产物真的齐、真的装得进去**:manifest 是合法 MV3、
+      # 三个脚本不是空壳、字形库能解开(坏 gzip ⇒ 扩展静默失能)。
+      - name: Chromium extension build + verify
+        shell: bash
+        run: |
+          mkdir -p vendor
+          cp tauri-app/src-tauri/resources/glyph-db-48.crdb.gz vendor/glyph-db-48.crdb.gz
+          npm run build:extension
+          node --test tools/verify/verify-chromium-extension.cjs
+
       # 硬门禁:界面层的回归(跑不过就不发包)。
       # - 换页时内容区**底下**那条横向滚动条不许再出现
       #   (用户反馈「下面有个滑条在滑动」),画面横滑的动画不许丢;
@@ -106,7 +131,15 @@ jobs:
           path: tauri-app/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
-      - name: Publish GitHub Release（exe 附件）
+      # 只下了 .exe 的用户也得能拿到浏览器修复扩展 ⇒ 单独发一个附件。
+      # (桌面交付包 `模拟输入-Windows-全部.zip` 里也带了一份。)
+      - name: Pack Chromium extension for release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist-core/chromium/*" -DestinationPath "browser-extension-chromium.zip" -Force
+          Write-Host "browser-extension-chromium.zip: $((Get-Item browser-extension-chromium.zip).Length) bytes"
+
+      - name: Publish GitHub Release（exe + 浏览器扩展附件）
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -114,5 +147,5 @@ jobs:
           $exe = (Get-ChildItem "tauri-app/src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1)
           $tag = "win-tauri-${{ github.run_id }}"
           $title = "Windows Tauri build ${{ github.run_id }} (${{ github.ref_name }})"
-          gh release create $tag $exe.FullName --title $title --notes "Tauri 版 Windows 构建" --prerelease
+          gh release create $tag $exe.FullName "browser-extension-chromium.zip" --title $title --notes "Tauri 版 Windows 构建" --prerelease
           "Published: $tag"

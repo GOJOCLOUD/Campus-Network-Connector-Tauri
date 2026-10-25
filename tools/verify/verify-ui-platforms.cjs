@@ -347,14 +347,20 @@ async function probeLayout(page) {
       check('Windows 不显示授权小问号(Windows 没有「辅助功能」这回事)', !winBadge);
       check('Windows 界面上没有橙色大横幅', !winStep2.text.includes('未获得「辅助功能」权限'));
 
-      // ── 右上角必须是**四个**按钮:最小化 / 最大化 / 关闭软件 / 放到后台 ──
+      // ── 右上角只留**两个**按钮:最小化 / 叉叉(=终止)──
       //
-      // 2026-10-25 用户口径:「你加一个最小化,加一个关闭,加一个最大化,
-      // 别他妈就只留小叉,让小叉变成放在后台,那不然人家真正想关软件还得点两次」。
+      // 2026-10-25 用户口径(第二次,最终版):「把全屏按钮给我删除掉,最小化保留,
+      // 然后叉叉也保留,你能不能搞个终止按钮,搞个叉车,两个就重复了呀,
+      // 现在就保留两个,一个最小化,一个终止,终止的形状要叉叉,其他的都不要」。
       //
-      // - **最小化** / **最大化**(再点一次还原);
-      // - **关闭软件** = 彻底退出(一次点击就退,不用先去托盘再点一次);
-      // - **小叉 = 放到后台**(窗口藏起来、进程留着,功能继续生效)。
+      // - **最小化**;
+      // - **叉叉** = **终止**(形状就是叉叉;彻底退出,一次点击就退)。
+      //
+      // 被删掉的三个(都是用户明令,不是我们自己猜的):
+      // - **最大化**(「把全屏按钮给我删除掉」);
+      // - **关闭软件**(电源图标)—— 与叉叉**重复**(用户原话「搞个叉车,两个就重复了呀」);
+      // - **放到后台** —— 窗口藏起来**仍然做得到**:Alt+F4 / 任务栏右键「关闭窗口」,
+      //   回来靠**托盘图标**(左键)或再运行一次程序。
       const corner = await page.evaluate(() => {
         const host = [...document.querySelectorAll('.app-nodrag')].find((d) => {
           const c = typeof d.className === 'string' ? d.className : '';
@@ -366,10 +372,10 @@ async function probeLayout(page) {
           title: b.getAttribute('title') || '',
         }));
       });
-      check('Windows 右上角有 4 个按钮', corner && corner.length === 4,
+      check('Windows 右上角只有 2 个按钮', corner && corner.length === 2,
         corner ? corner.map((b) => b.aria).join(',') : '没找到右上角按钮组');
-      check('四个按钮是「最小化 / 最大化 / 关闭软件 / 放到后台」',
-        corner && corner.map((b) => b.aria).join(',') === '最小化,最大化,关闭软件,放到后台',
+      check('两个按钮是「最小化 / 终止(叉叉)」',
+        corner && corner.map((b) => b.aria).join(',') === '最小化,终止',
         corner ? corner.map((b) => b.aria).join(',') : '');
 
       // 点这四个按钮,看它们各自调的是哪个窗口动作。
@@ -387,12 +393,11 @@ async function probeLayout(page) {
         [...host.querySelectorAll('button')].forEach((b) => b.click());
       });
       const calls = await page.evaluate(() => window.__winCalls);
-      check('四个按钮分别调 minimize / maximize / quit / hide',
-        JSON.stringify(calls) === JSON.stringify(['minimize', 'maximize', 'quit', 'hide']),
+      check('两个按钮分别调 minimize / quit',
+        JSON.stringify(calls) === JSON.stringify(['minimize', 'quit']),
         JSON.stringify(calls));
-      check('「放到后台」(小叉)调的是 hide(不是退出),「关闭软件」才是 quit',
-        calls.includes('hide') && calls.filter((c) => c === 'quit').length === 1,
-        JSON.stringify(calls));
+      check('右上角**没有**「放到后台」(hide)按钮了(用户明令删掉)',
+        !calls.includes('hide'), JSON.stringify(calls));
 
       // ── 「从剪贴板读入并键入」按钮**已经撤掉**(2026-10-25 用户口径)──
       //
@@ -499,13 +504,13 @@ async function probeLayout(page) {
       await page.close();
     }
 
-    // ── Windows 线**只抢 ⌃D**,不抢 ⌃S(源码级断言)──
+    // ── Windows 线**只抢 ⌃⇧D**,不抢 ⌃S(源码级断言)──
     //
     // 2026-10-25 用户口径:「干脆直接把系统的抢了,我的软件优先级最高……
     // Ctrl 加 D 我发现在普通桌面它是退出软件的功能,那在使用这个的时候
-    // 没必要退出吧,所以就给他压制住」。
+    // 没必要退出吧,所以就给他压制住」+「你不要用ctrl+D了,直接ctrl+shift+D吧」。
     //
-    // - **⌃D** = 读剪贴板并键入 —— 我们抢的就是它(抢到手,别的软件就收不到);
+    // - **⌃⇧D** = 读剪贴板并键入 —— 我们抢的就是它(抢到手,别的软件就收不到);
     // - **⌃S** = 默认执行(回放)—— Windows 上那一屏**已经没有界面了**
     //   (ADR-0016),而 Ctrl+S 在别的软件里是「保存」⇒ **不抢**。
     //
@@ -515,19 +520,30 @@ async function probeLayout(page) {
         path.join(__dirname, '..', '..', 'tauri-app', 'src-tauri', 'src', 'lib.rs'),
         'utf8',
       );
-      // 注册清单由 `global_shortcut_keys()` 决定 —— 它必须**只含 ⌃D**。
+      // 注册清单由 `global_shortcut_keys()` 决定 —— 它必须**只含 ⌃⇧D**。
       const keysFn = libRs.match(/pub fn global_shortcut_keys\(\)[^{]*\{([^{}]*)\}/);
       const keysBody = keysFn ? keysFn[1] : '';
-      check('Tauri 的全局快捷键清单里**有** ⌃D(要抢的就是它)',
+      check('Tauri 的全局快捷键清单里**有** ⌃⇧D(要抢的就是它)',
         /SHORTCUT_PASTE/.test(keysBody),
         keysBody.trim() || '没找到 global_shortcut_keys()');
       check('Tauri 的全局快捷键清单里**没有** ⌃S(默认执行:Windows 那屏已撤,且 Ctrl+S 是「保存」)',
         !/SHORTCUT_DEFAULT_EXECUTE/.test(keysBody), keysBody.trim());
+      // ⌃⇧D 的**值**必须是 `Control+Shift+D`:
+      //   - 少了 Shift ⇒ 又变成 ⌃D(用户明令改掉的键,而且 ⌃D 在别的软件里
+      //     是「退出」那一族);
+      //   - 修饰键必须写在键**之前**(global-hotkey 0.8.0 的解析器要求,
+      //     `Ctrl+Shift+D` 能解析,`Ctrl+D+Shift` 直接报错)。
+      const pasteConst = libRs.match(/SHORTCUT_PASTE\s*:\s*&str\s*=\s*"([^"]+)"/);
+      const pasteVal = pasteConst ? pasteConst[1] : '';
+      check('Tauri 的 ⌃⇧D 常量值是 "Control+Shift+D"',
+        pasteVal === 'Control+Shift+D', pasteVal || '没找到 SHORTCUT_PASTE 的值');
+      check('Tauri 的 ⌃⇧D **没有**退回成 "Control+D"(用户明令改键)',
+        pasteVal !== 'Control+D', pasteVal);
       // Control 按下/松开的轮询观察器**只为全局键的 latch 服务** ——
-      // 抢了 ⌃D 就必须开着(不然按住 Ctrl 连按会连着触发,剪贴板被键入好几遍)。
+      // 抢了 ⌃⇧D 就必须开着(不然按住 Ctrl 连按会连着触发,剪贴板被键入好几遍)。
       // (查的是**开关常量**,不是"调用点消失":调用点还在,被这个开关挡着。)
       const observerOn = /HOTKEY_OBSERVER_ENABLED:\s*bool\s*=\s*true/.test(libRs);
-      check('Control 轮询观察器是开的(⌃D 的 latch 需要它)',
+      check('Control 轮询观察器是开的(⌃⇧D 的 latch 需要它)',
         observerOn,
         observerOn ? 'HOTKEY_OBSERVER_ENABLED = true' : '没找到 HOTKEY_OBSERVER_ENABLED = true');
       // 「抢没抢到」要能被界面读到 ⇒ 原生状态里必须有这一栏。
@@ -544,6 +560,38 @@ async function probeLayout(page) {
         !/global_shortcuts_enabled\s*=\s*false/.test(libRs),
         /global_shortcuts_enabled\s*=\s*(true|false)/.exec(libRs)
           ? /global_shortcuts_enabled\s*=\s*(true|false)/.exec(libRs)[0] : '没找到 global_shortcuts_enabled');
+    }
+
+    // ── 最后一页必须有**浏览器修复的说明块**(Windows 线)──
+    //
+    // 用户 2026-10-25:「在windows上那个把密文转化成明文的那个功能是失效的,
+    // 没有用的」「最后个页面的相关提示也和macOS上面的两个版本完全不同」。
+    //
+    // Windows 上的浏览器修复由 **Chrome/Edge 扩展**提供(桌面程序接管不了浏览器),
+    // 所以界面上给的是**说明块**而不是开关 —— 但**必须有**,
+    // 否则用户根本不知道这个功能在哪、怎么用 ⇒ 等于没有。
+    {
+      const page = await browser.newPage();
+      await page.evaluateOnNewDocument(stub('win32', false, {
+        ok: true, platform: 'win32', shortcutPasteRegistered: true,
+      }));
+      await page.goto(base, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, 600));
+      await gotoStep(page, 1);
+      const last = await probe(page);
+      check('Windows 最后一页有「浏览器修复(复制修复)」说明块',
+        last.text.includes('浏览器修复') && last.text.includes('复制修复'),
+        last.text.includes('浏览器修复') ? '' : last.text.slice(0, 200));
+      check('说明块说清楚了它由 Chrome / Edge 扩展提供',
+        /Chrome\s*\/\s*Edge|chrome:\/\/extensions/.test(last.text), '');
+      check('说明块给出了加载扩展的入口(chrome://extensions)',
+        last.text.includes('chrome://extensions'), '');
+      check('说明块告诉了用户扩展文件夹在哪儿(browser-extension)',
+        last.text.includes('browser-extension'), '');
+      // **不该**出现 mac 的「Safari 复制修复」开关(Windows 上没有 Safari)。
+      check('Windows 最后一页**没有** mac 的「Safari 复制修复」开关',
+        !last.text.includes('Safari 复制修复'), '');
+      await page.close();
     }
   } finally {
     await browser.close();

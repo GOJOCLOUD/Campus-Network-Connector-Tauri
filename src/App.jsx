@@ -18,6 +18,37 @@ const isMac = cnc.platform === 'darwin';
 // 不需要输入源切换,功能不缺。
 const isWindows = cnc.platform === 'win32';
 
+/**
+ * **Windows 线:浏览器修复(复制修复)由 Chrome / Edge 扩展提供。**
+ *
+ * mac 上这个能力是**原生**的(Apple Events 驱动 Safari),界面上是一个**开关**,
+ * 一拨就接管;Windows 上没有 Safari、没有 Apple Events,桌面程序**接管不了浏览器**
+ * ⇒ 那个能力只能由**扩展**提供,而扩展装不装、装在哪,桌面上**管不着**
+ * ⇒ 给一个开关就是骗人。
+ *
+ * ⇒ 界面上给的是**说明块**:说清楚它由谁提供、去哪拿、怎么装。
+ *   位置与 mac 的「Safari 复制修复」开关**完全相同**(这一页的最上面)。
+ *
+ * 用户 2026-10-25 原话:「在windows上那个把密文转化成明文的那个功能是失效的,
+ * 没有用的」「最后个页面的相关提示也和macOS上面的两个版本完全不同」。
+ */
+const BROWSER_REPAIR_NOTE = {
+  title: '浏览器修复(复制修复)',
+  body: [
+    '把被网页字体混淆的文字还原成你看到的那句话 —— 网页上复制出来是明文,不是密文。',
+    '',
+    'Windows 上这个功能由 Chrome / Edge 扩展提供(桌面程序接管不了浏览器)。',
+    '',
+    '装一次(装完一直有效):',
+    '1) 打开 Chrome 或 Edge,地址栏输入 chrome://extensions(Edge 是 edge://extensions)',
+    '2) 右上角打开「开发者模式」',
+    '3) 点「加载已解压的扩展程序」,选 browser-extension 文件夹',
+    '   (它在安装包解压出来的目录里,和两个安装程序放在一起)',
+    '',
+    '提示:Chrome 按路径引用这个文件夹 ⇒ 建议先把它复制到一个固定位置再加载。',
+  ].join('\n'),
+};
+
 function App() {
   const [name, setName] = useState('')
   const [isRecording, setIsRecording] = useState(false)
@@ -231,7 +262,7 @@ function App() {
     const onKeyDown = (e) => {
       // ⚠️ **Windows 线这两个键一律不在窗口内接管**(2026-10-25 用户口径)。
       //
-      // - **⌃D 我们抢成全局热键了**(读剪贴板并键入)。它在**别的软件**里
+      // - **⌃⇧D 我们抢成全局热键了**(读剪贴板并键入)。它在**别的软件**里
       //   是「退出软件」那一族动作 —— 抢到手,那个软件就**收不到**它,
       //   于是**不会被自己的「退出」关掉**
       //   (用户原话:「干脆直接把系统的抢了,我的软件优先级最高……
@@ -242,10 +273,10 @@ function App() {
       //   (上一轮按用户口径撤掉:「本来就没有这个功能」)⇒ 留着它就是一个
       //   **没有入口的隐藏功能**;而且 Ctrl+S 在别的软件里是「保存」。
       //
-      // 所以 Windows 线:**⌃D 走系统级全局热键、⌃S 不注册**;
+      // 所以 Windows 线:**⌃⇧D 走系统级全局热键、⌃S 不注册**;
       // 而**窗口内**这两个键都不拦 —— 在我们自己的窗口里它们就是普通按键。
       //
-      // 下面这两条是 macOS 线(⌃S 默认执行 / ⌃D 读剪贴板并键入),
+      // 下面这两条是 macOS 线(⌃S 默认执行 / ⌃⇧D 读剪贴板并键入),
       // 只认 **Control**:不认 Win/Alt,也不要求 Shift(带 Shift 照样触发)——
       // 两个平台**逐字一致**(见 ADR-0013)。
       if (isWindows) return
@@ -598,19 +629,22 @@ function App() {
     onNameChange: setName,
     onPinyinInput: (text) => requestPinyinInput(text || ''),
     onClearText: () => setName(''),
-    // ⌃D **抢没抢到**必须看得见(2026-10-24 用户口径:
+    // ⌃⇧D **抢没抢到**必须看得见(2026-10-24 用户口径:
     // 「怎么保证它使用的是你的功能而不是系统功能」)。
     // 抢不到 ⇒ 那个组合键被别的软件先注册了 ⇒
-    // ① 按它**不会触发我们**;② 目标软件自己的 Ctrl+D 也**照常生效**
+    // ① 按它**不会触发我们**;② 目标软件自己的 Ctrl+Shift+D 也**照常生效**
     // (所以那个软件还是会被它的「退出」关掉)—— 这两件都要让用户知道。
     shortcutNotice: (nativeStatus && nativeStatus.shortcutPasteRegistered === false)
-      ? 'Ctrl+D 没抢到(这个组合键被别的软件先注册了):按它不会触发我们,目标软件自己的 Ctrl+D 也会照常生效。'
+      ? 'Ctrl+Shift+D 没抢到(这个组合键被别的软件先注册了):按它不会触发我们,目标软件自己的 Ctrl+Shift+D 也会照常生效。'
       : '',
     pinyinCountdown,
     message,
     featureList,
     featureStatus,
     onToggleFeature: toggleFeature,
+    // Windows 线:浏览器修复的**说明块**(不是开关 —— 桌面程序接管不了浏览器,
+    // 那个能力由 Chrome/Edge 扩展提供)。位置与 mac 的「Safari 复制修复」开关相同。
+    browserRepairNote: isWindows ? BROWSER_REPAIR_NOTE : null,
     // 「辅助功能」授权状态:不做成占一整条的大横幅,只在第 4 页放一个小问号
     // (红=还不能用,绿=可以用),点一下直接跳到系统设置。
     // **只有 macOS 有「辅助功能」这回事**(Windows 的 SendInput 不需要授权),
@@ -676,18 +710,18 @@ function App() {
           /* macOS 用原生红绿灯(见 main.js 的 titleBarStyle/trafficLightPosition),
              这里只给没有原生按钮的平台兜底。
 
-             Windows 线自绘**四个**按钮(2026-10-24 用户口径:
-             「你加一个最小化,加一个关闭,加一个最大化,别他妈就只留小叉,
-               让小叉变成放在后台,那不然人家真正想关软件还得点两次」):
+             Windows 线自绘**两个**按钮(2026-10-25 用户口径:
+             「把全屏按钮给我删除掉,最小化保留,然后叉叉也保留,
+               你能不能搞个终止按钮,搞个叉车,两个就重复了呀,
+               现在就保留两个,一个最小化,一个终止,终止的形状要叉叉」):
 
-             - **最小化** / **最大化**(再点一次还原);
-             - **关闭软件** = 彻底退出进程 —— **一次点击就退**,
-               不用先去托盘再点一次;
-             - **小叉** = **放到后台**(窗口藏起来,进程留着,功能继续生效)
-               —— 小叉**不是退出**。
+             - **最小化**;
+             - **叉叉** = **终止**(彻底退出进程,一次点击就退)。
 
-             放到后台之后:托盘图标(左键)把窗口叫回来,
-             托盘右键「退出程序」彻底退出。 */
+             ⚠️ 那个**电源图标**的「关闭软件」按钮与叉叉**重复** ⇒ 删掉;
+                「最大化」按用户口径删掉;「放到后台」这个按钮也删掉
+                (窗口藏起来**仍然做得到**:**Alt+F4 / 任务栏右键「关闭窗口」**,
+                 回来靠**托盘图标**(左键)或再运行一次程序)。 */
           !isMac && (
             <div className="flex items-center gap-0.5">
               <button
@@ -703,33 +737,10 @@ function App() {
               </button>
               <button
                 type="button"
-                onClick={() => cnc.maximize?.()}
-                title="最大化（再点一次还原）"
-                aria-label="最大化"
-                className="h-6 w-6 flex items-center justify-center rounded text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round">
-                  <rect x="5" y="5" width="14" height="14" rx="1.5" />
-                </svg>
-              </button>
-              <button
-                type="button"
                 onClick={() => cnc.quit?.()}
-                title="关闭软件（彻底退出程序）"
-                aria-label="关闭软件"
-                className="h-6 w-6 flex items-center justify-center rounded text-gray-400 hover:bg-red-50 hover:text-red-600 transition"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M12 3v9" />
-                  <path d="M18.4 6.6a9 9 0 1 1-12.8 0" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                onClick={() => cnc.hide?.()}
-                title="放到后台（程序继续运行；托盘图标可以叫回来）"
-                aria-label="放到后台"
-                className="h-6 w-6 flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
+                title="终止（彻底退出程序）"
+                aria-label="终止"
+                className="h-6 w-6 flex items-center justify-center rounded-full text-gray-400 hover:bg-red-50 hover:text-red-600 transition"
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                   <path d="M18 6 6 18M6 6l12 12" />

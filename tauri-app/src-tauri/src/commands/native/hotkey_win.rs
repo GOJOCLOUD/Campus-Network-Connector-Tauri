@@ -22,14 +22,14 @@
 //!    `LowLevelHooksTimeout`(钩子回调太慢会被系统直接摘掉),
 //!    而且回调在系统 DLL 的上下文里,出问题很难查。
 //!
-//! 代价:轮询有间隔(20ms),**极短促的按下/松开有可能被漏掉**。
+//! 代价:轮询有间隔(8ms),**极短促的按下/松开有可能被漏掉**。
 //! 漏掉的只是「松开」那一下 ⇒ latch 多锁一次 ⇒ 下一次「Control 按下」
 //! 也不会解锁(规则就是这样),要等再下一次「松开」。
 //! 属于「宁可多锁一次,不可乱触发」的取舍。
 //!
 //! ## 轮询只做**边沿检测**
 //!
-//! 每 20ms 都会拿到一次「Control 现在按着没有」,但只有**状态变了**那一下
+//! 每 8ms 都会拿到一次「Control 现在按着没有」,但只有**状态变了**那一下
 //! 才值得通知 latch —— 否则 latch 会被反复喂同一个状态。
 //! 边沿检测本身是纯逻辑,在 `hotkey_core::CtrlEdgeDetector` 里(任何平台都能单测)。
 
@@ -42,8 +42,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
 
 use super::hotkey_core::{CtrlEdgeDetector, Hotkey, Latch};
 
-/// 轮询间隔。20ms ≈ 50Hz,CPU 占用可以忽略。
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// 轮询间隔。8ms ≈ 125Hz,CPU 占用可以忽略。
+///
+/// ⚠️ **2026-10-25 从 20ms 收紧到 8ms**:轮询太慢会**漏掉「松开」那一下**
+/// (用户点得很快时,一次按下+松开的持续时间可能短于采样间隔)
+/// ⇒ latch 多锁一次 ⇒ **下一次按键也触发不了**
+/// (用户看到的现象就是「按了没反应,而且怎么按都不行」)。
+/// 8ms 让漏掉的概率大幅下降。
+const POLL_INTERVAL: Duration = Duration::from_millis(8);
 
 /// 观察源与 latch 的当前状态。
 struct State {

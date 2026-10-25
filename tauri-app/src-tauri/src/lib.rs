@@ -37,7 +37,7 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "level": native_window_level(&app),
                 }),
             );
-            // 全局快捷键:注册成功没有(Electron 版有 ⌃S / ⌃D 两个)
+            // 全局快捷键:注册成功没有(Electron 版有 ⌃S / ⌃⇧D 两个)
             // macOS 是自己监听事件(见 native::hotkey),那边还有 tap 的状态;
             // Windows 是系统的全局热键 + latch 的观察源(见 native::hotkey_win)。
             //
@@ -49,7 +49,7 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
             let tap_state = nativecmd::hotkey_win::diagnostics();
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let tap_state = serde_json::Value::Null;
-            // Windows 线**抢 ⌃D**(2026-10-25 用户口径):⌃D 在别的软件里是
+            // Windows 线**抢 ⌃⇧D**(2026-10-25 用户口径):⌃⇧D 在别的软件里是
             // 「退出软件」那一族动作 ⇒ 我们抢到手,别的软件就**收不到**它,
             // 那个软件也就不会被自己的「退出」关掉。
             //
@@ -62,7 +62,7 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                 serde_json::json!({
                     "registered": registered_shortcuts(),
                     "globalShortcutsEnabled": global_shortcuts_enabled,
-                    // ⌃D **抢到了没有** —— 界面的提示行也靠它。
+                    // ⌃⇧D **抢到了没有** —— 界面的提示行也靠它。
                     "pasteRegistered": crate::shortcut_paste_registered(),
                     "defaultExecute": SHORTCUT_DEFAULT_EXECUTE,
                     "paste": SHORTCUT_PASTE,
@@ -265,10 +265,10 @@ fn registered_shortcuts() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 「⌃D」这个全局键**抢到了没有**(界面要用)。
+/// 「⌃⇧D」这个全局键**抢到了没有**(界面要用)。
 ///
 /// 抢不到 = 别的软件先注册了同一个组合键 ⇒
-/// 我们的 ⌃D **不会触发**,而目标软件自己的 Ctrl+D 也**照常生效**
+/// 我们的 ⌃⇧D **不会触发**,而目标软件自己的 Ctrl+Shift+D 也**照常生效**
 /// (所以那个软件还是会被它自己的「退出」关掉)⇒ 必须让用户知道。
 pub fn shortcut_paste_registered() -> bool {
     registered_shortcuts().iter().any(|k| k == SHORTCUT_PASTE)
@@ -598,8 +598,8 @@ pub fn run() {
         }))
         // 全局快捷键插件。
         //
-        // Windows 线抢 **⌃D**(读剪贴板并键入)——
-        // 抢到手,别的软件就收不到 Ctrl+D,那个软件也就不会被它的「退出」关掉
+        // Windows 线抢 **⌃⇧D**(读剪贴板并键入)——
+        // 抢到手,别的软件就收不到 Ctrl+Shift+D,那个软件也就不会被它的「退出」关掉
         // (2026-10-24 用户口径:「干脆直接把系统的抢了,我的软件优先级最高」;
         //  抢没抢到要**看得见** —— 见 `get_native_status` 的 `shortcutPasteRegistered`)。
         // ⌃S(默认执行)**不抢**:Windows 上那一屏已经没有界面了,
@@ -635,7 +635,7 @@ pub fn run() {
                     #[cfg(target_os = "windows")]
                     if !nativecmd::hotkey_win::try_fire(nativecmd::hotkey_core::Hotkey::Paste) {
                         commands::shortcuts::record_shortcut_hit(
-                            "⌃D",
+                            "⌃⇧D",
                             "latch 还锁着(Control 还没松开),这次没有重复执行",
                         );
                         return;
@@ -763,7 +763,7 @@ pub fn run() {
             }
             #[cfg(target_os = "windows")]
             {
-                // ⌃D 是**全局键** ⇒ latch 要用 ⇒ 观察 Control 的按下/松开
+                // ⌃⇧D 是**全局键** ⇒ latch 要用 ⇒ 观察 Control 的按下/松开
                 // (那个线程每 20ms 轮询一次 `GetAsyncKeyState(VK_CONTROL)`;
                 //  latch 靠它才解得开:触发一次之后必须松开 Control 才重新武装)。
                 //
@@ -829,13 +829,16 @@ pub fn run() {
 
 /// Windows 线要注册的**全局快捷键**清单。
 ///
-/// ## 只抢 **⌃D**,不抢 ⌃S
+/// ## 只抢 **⌃⇧D**,不抢 ⌃S
 ///
-/// - **⌃D**:2026-10-24 用户口径「干脆直接把系统的抢了,我的软件优先级最高」。
-///   原因:在普通 Windows 软件里,Ctrl+D 常常是「**退出软件**」那一族动作
-///   (菜单加速键)。我们在模拟输入时按到它,那个软件会**直接被关掉** ——
-///   用户原话:「我不能让设置为快捷键,不然他直接把软件退出了」。
-///   ⇒ 自己把它注册成全局热键,别的软件就**收不到**它,那个软件也就退不了。
+/// - **⌃⇧D**(2026-10-25 换键):用户原话「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」。
+///   换键有两个理由:
+///   1. **⌃D 冲突太重**:在普通 Windows 软件里,Ctrl+Shift+D 常常是「**退出软件**」
+///      那一族动作(菜单加速键)⇒ 抢它容易和别人打架,抢不到就是快捷键直接失灵;
+///      而 **⌃⇧D 几乎没人用** ⇒ 抢到的概率高得多。
+///   2. 抢到手,别的软件就**收不到**它 ⇒ 模拟输入时按到它,那个软件
+///      **不会被自己的「退出」关掉**(用户原话:「干脆直接把系统的抢了,
+///      我的软件优先级最高……没必要退出吧,所以就给他压制住」)。
 ///
 ///   能不能真抢到,取决于**谁先注册**:
 ///   - 对方是**菜单加速键**(绝大多数软件的「退出」都是这种)⇒ 我们注册的
@@ -861,7 +864,7 @@ pub fn global_shortcut_keys() -> Vec<&'static str> {
 /// 这个线程**只为全局快捷键的 latch 服务**(latch 靠它解得开:
 /// 触发一次之后必须松开 Control 才重新武装)。
 ///
-/// ⌃D 是全局键 ⇒ latch 要用 ⇒ **要启动**。
+/// ⌃⇧D 是全局键 ⇒ latch 要用 ⇒ **要启动**。
 /// (观察源是 `GetAsyncKeyState(VK_CONTROL)`,每 20ms 轮询一次。)
 ///
 /// 写成一个常量(而不是干脆删掉那段代码)是为了:
@@ -879,10 +882,10 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     let gs = app.global_shortcut();
-    // 先把**本进程**里可能残留的注册清掉(老版本注册过 ⌃S / ⌃D)。
+    // 先把**本进程**里可能残留的注册清掉(老版本注册过 ⌃S / ⌃⇧D)。
     let _ = gs.unregister_all();
 
-    // 抢 **⌃D**(清单见 `global_shortcut_keys`)。
+    // 抢 **⌃⇧D**(清单见 `global_shortcut_keys`)。
     // 抢没抢到会记进 `ok_list` ⇒ 诊断与界面都能看到。
     let keys = global_shortcut_keys();
 
@@ -906,11 +909,11 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
 /// 快捷键的组合键字符串。
 ///
 /// ⚠️ **必须写 `Control`,不能写 `CmdOrControl`**:
-/// Electron 版注册的是 `globalShortcut.register('Ctrl+S' / 'Ctrl+D')`
-/// —— 也就是 **⌃S / ⌃D**。
+/// Electron 版注册的是 `globalShortcut.register('Ctrl+S' / 'Ctrl+Shift+D')`
+/// —— 也就是 **⌃S / ⌃⇧D**。
 /// 而 `CmdOrControl` 在 macOS 上会被解析成 **⌘(Command)**(global-hotkey 的
 /// `CMDORCONTROL` 在 macOS 分支映射到 `Modifiers::SUPER`),
-/// 结果就是:系统里监听的是 ⌘D,用户按 ⌃D **什么都不会发生**。
+/// 结果就是:系统里监听的是 ⌘D,用户按 ⌃⇧D **什么都不会发生**。
 ///
 /// `Control` 在所有平台都是 Control,和 Electron 版完全同口径。
 ///
@@ -918,7 +921,11 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
 /// (2026-10-23 用户要求:「只要按住 Ctrl 再点一下字母」)。
 /// 判定只看「有没有 Control」——见 `commands::native::hotkey_core::match_hotkey`。
 const SHORTCUT_DEFAULT_EXECUTE: &str = "Control+S";
-const SHORTCUT_PASTE: &str = "Control+D";
+/// **⌃⇧D**(2026-10-25 用户口径:「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」)。
+///
+/// 换键的理由见 `global_shortcut_keys` 的说明:⌃D 冲突太重(常见「退出键」),
+/// ⌃⇧D 几乎没人用 ⇒ 抢到的概率高得多。
+const SHORTCUT_PASTE: &str = "Control+Shift+D";
 
 /// 把组合键字符串解析成插件的 Shortcut。
 fn parse_shortcut(key: &str) -> Option<tauri_plugin_global_shortcut::Shortcut> {
@@ -936,10 +943,10 @@ mod shortcut_tests {
     use super::*;
     use tauri_plugin_global_shortcut::Modifiers;
 
-    /// 快捷键必须与 Electron 版**同口径**:⌃S / ⌃D(Control),不是 ⌘(Command)。
+    /// 快捷键必须与 Electron 版**同口径**:⌃S / ⌃⇧D(Control),不是 ⌘(Command)。
     ///
     /// 这条写死过:写成了 `CmdOrControl+Shift+D`,在 macOS 上被解析成 ⌘,
-    /// 用户按 ⌃D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
+    /// 用户按(当时的)⌃⇧D 全程没反应 —— 而且"注册成功"的日志看起来一切正常。
     #[test]
     fn 全局快捷键是Control不是Command() {
         for key in [SHORTCUT_DEFAULT_EXECUTE, SHORTCUT_PASTE] {
@@ -955,19 +962,14 @@ mod shortcut_tests {
                 "{} 不能带 Command(⌘)—— macOS 上 CmdOrControl 就是 ⌘,和 Electron 版不一致",
                 key
             );
-            assert!(
-                !s.mods.contains(Modifiers::SHIFT),
-                "{} 不要再带 Shift —— 原来要「⌃⇧ + 字母」三根手指一起按,太别扭 \
-                 (2026-10-23 用户要求:「只要按住 Ctrl 再点一下字母」)",
-                key
-            );
         }
     }
 
-    /// Windows 线**只抢 ⌃D,不抢 ⌃S**(2026-10-24 用户口径)。
+    /// Windows 线**只抢 ⌃⇧D,不抢 ⌃S**(2026-10-25 换键后的口径)。
     ///
-    /// - **⌃D 要抢**:在普通 Windows 软件里,Ctrl+D 常常是「退出软件」那一族动作。
-    ///   我们抢到手 ⇒ 别的软件收不到它 ⇒ 模拟输入时按到它,那个软件不会被关掉。
+    /// - **⌃⇧D 要抢**:⌃D 冲突太重(在普通 Windows 软件里常常是「退出软件」
+    ///   那一族动作)⇒ 换成一个几乎没人用的组合键,抢到的概率高得多。
+    ///   抢到手 ⇒ 别的软件收不到它 ⇒ 模拟输入时按到它,那个软件不会被关掉。
     /// - **⌃S 不抢**:它驱动的「默认执行(回放)」在 Windows 上已经没有界面了;
     ///   而且 Ctrl+S 在别的软件里是「保存」,抢过来会把人家的保存弄坏。
     ///
@@ -977,16 +979,23 @@ mod shortcut_tests {
         let keys = global_shortcut_keys();
         assert!(
             keys.contains(&SHORTCUT_PASTE),
-            "⌃D(读剪贴板并键入)必须注册:它抢到手,别的软件才收不到 Ctrl+D"
+            "⌃⇧D(读剪贴板并键入)必须注册:它抢到手,别的软件才收不到 Ctrl+Shift+D"
         );
         assert!(
             !keys.contains(&SHORTCUT_DEFAULT_EXECUTE),
             "⌃S(默认执行)不注册:Windows 上那一屏已经没有界面了,而 Ctrl+S 在别的软件里是「保存」"
         );
-        // ⌃D 是全局键 ⇒ latch 要用 ⇒ 观察线程必须开着。
+        // ⌃⇧D **必须带 Shift**(2026-10-25 口径)—— 少了它就退回冲突重重的 ⌃D。
+        let parsed = parse_shortcut(SHORTCUT_PASTE).unwrap();
+        assert!(
+            parsed.mods.contains(Modifiers::SHIFT),
+            "⌃⇧D 必须带 Shift,实际 mods={:?}",
+            parsed.mods
+        );
+        // ⌃⇧D 是全局键 ⇒ latch 要用 ⇒ 观察线程必须开着。
         assert!(
             HOTKEY_OBSERVER_ENABLED,
-            "⌃D 是全局键,latch 靠 Control 的按下/松开解得开 ⇒ 观察线程必须启动"
+            "⌃⇧D 是全局键,latch 靠 Control 的按下/松开解得开 ⇒ 观察线程必须启动"
         );
     }
 }

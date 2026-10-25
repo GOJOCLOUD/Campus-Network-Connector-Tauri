@@ -9,6 +9,7 @@ export default function KeyboardPanel({
   onPinyinInput,
   onClearText,
   shortcutNotice,
+  browserRepairNote,
   pinyinCountdown,
   message,
   featureList,
@@ -20,7 +21,8 @@ export default function KeyboardPanel({
 }) {
   // 「辅助功能」授权状态:一个小问号就够,不做成占一整条的大横幅。
   // 红=还不能用(模拟点击/回放/键入发不出去),绿=可以用,灰=状态未知。
-  // **Windows 没有「辅助功能」**(SendInput 不需要授权)→ 那边根本不显示这个小问号。
+  // **Windows 没有「辅助功能」**(SendInput 不需要授权)→ 那边根本不显示这个小问号
+  // (App.jsx 传的是 `showAccessibilityBadge: isMac`,Windows 上恒为 false)。
   const trusted = accessibilityTrusted === true
   const unknown = accessibilityTrusted === null || accessibilityTrusted === undefined
   const badgeClass = unknown
@@ -51,6 +53,23 @@ export default function KeyboardPanel({
         )}
       </div>
       {<FeatureToggles featureList={featureList} featureStatus={featureStatus} onToggle={onToggleFeature} />}
+      {/* **浏览器修复**(复制修复)的说明块 —— 位置与 mac 的「Safari 复制修复」
+          开关**完全相同**(都在这一页的最上面),但**内容不是开关**。
+
+          为什么不是开关:mac 上这个能力是**原生**的(Apple Events 驱动 Safari),
+          开关一拨就接管了;Windows 上没有 Safari、没有 Apple Events,
+          桌面程序**接管不了浏览器** ⇒ 那个能力由 **Chrome/Edge 扩展**提供,
+          而扩展装不装、装在哪,桌面上**管不着** ⇒ 给一个开关就是骗人。
+
+          ⇒ 给一个**说明块**:说清楚它由谁提供、去哪拿、怎么装。
+          (用户 2026-10-25:「在windows上那个把密文转化成明文的那个功能是失效的,
+           没有用的」「最后个页面的相关提示也和macOS上面的两个版本完全不同」) */}
+      {browserRepairNote ? (
+        <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-2">
+          <div className="font-medium">{browserRepairNote.title}</div>
+          <div className="mt-1 text-xs leading-relaxed whitespace-pre-line">{browserRepairNote.body}</div>
+        </div>
+      ) : null}
       {/* ⌃D **抢没抢到**的提示:抢不到时必须说清楚,否则用户只会觉得
           「按了没反应」,还不知道是不是我们自己的问题。 */}
       {shortcutNotice && (

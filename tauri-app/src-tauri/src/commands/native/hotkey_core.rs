@@ -84,7 +84,7 @@ impl Hotkey {
     pub fn label(&self) -> &'static str {
         match self {
             Hotkey::Execute => "⌃S",
-            Hotkey::Paste => "⌃D",
+            Hotkey::Paste => "⌃⇧D",
         }
     }
 }
@@ -107,8 +107,87 @@ pub fn match_hotkey(key: PrimaryKey, mods: u8) -> Option<Hotkey> {
     }
     match key {
         PrimaryKey::S => Some(Hotkey::Execute),
-        PrimaryKey::D => Some(Hotkey::Paste),
+        // **⌃⇧D**(2026-10-25 用户口径:「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」)
+        // ⇒ Control 之外**还要 Shift**。
+        //
+        // 「此刻必须按住 Shift」太挑人(三个手指按下三个键的时间点不可能完全重合),
+        // 容错由 [`StickyModifiers`] 兜:Shift 在窗口内**按下过**也算数。
+        PrimaryKey::D => {
+            if mods & MOD_SHIFT == 0 {
+                None
+            } else {
+                Some(Hotkey::Paste)
+            }
+        }
         PrimaryKey::Other => None,
+    }
+}
+
+// ── 修饰键的「粘滞窗口」────────────────────────────────────────────
+
+/// 修饰键的**粘滞窗口**:一个修饰键在窗口内**按下过**就算数。
+///
+/// ## 为什么要有(用户 2026-10-25 的口径)
+///
+/// > 「这里我有一个策略的快捷键策略就是在一定时间内,三个按键只要同时按了
+/// > 就可以触发就行了,别搞了非常严格的顺序,或者说时间间隔特别短,
+/// > 这样太难触发了」
+///
+/// 三个手指按三个键,时间点不可能完全重合;而且「Shift 先松、Ctrl 后松、
+/// D 最后按」这种顺序,按「此刻必须按住」来判就是**不触发**。
+///
+/// ⇒ 规则:**修饰键在窗口内按下过就算数**(哪怕此刻已经松开)。
+/// 配合「跟踪到的修饰键 ∪ 事件自带的」并集,**按键顺序不再是问题**。
+///
+/// ## 为什么不制造假阳性
+///
+/// - 修饰键**此刻按着** ⇒ 一定算数(不管按了多久);
+/// - 修饰键**已经松开** ⇒ 只有「窗口内按下过」才算数
+///   ⇒ 十分钟前随手按过一下 Ctrl,不会让今天的一次 ⇧D 误触发。
+///
+/// 窗口取 2 秒(与「回头认」的窗口同值):人手三键连按的间隔远小于这个量级。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StickyModifiers {
+    /// Control 最近一次**按下**的时刻
+    ctrl_at: Option<Instant>,
+    /// Shift 最近一次**按下**的时刻
+    shift_at: Option<Instant>,
+}
+
+impl StickyModifiers {
+    /// 新建(还没按过任何修饰键)。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 记一次「这些修饰键被按下了」(掩码里带的那几个)。
+    pub fn note_press(&mut self, mods: u8, at: Instant) {
+        if mods & MOD_CONTROL != 0 {
+            self.ctrl_at = Some(at);
+        }
+        if mods & MOD_SHIFT != 0 {
+            self.shift_at = Some(at);
+        }
+    }
+
+    /// 把「窗口内按下过」的修饰键并进 `held` ⇒ 得到「算数」的修饰键集合。
+    pub fn effective(&self, held: u8, now: Instant, window: Duration) -> u8 {
+        let mut mods = held;
+        if mods & MOD_CONTROL == 0 {
+            if let Some(at) = self.ctrl_at {
+                if now.duration_since(at) <= window {
+                    mods |= MOD_CONTROL;
+                }
+            }
+        }
+        if mods & MOD_SHIFT == 0 {
+            if let Some(at) = self.shift_at {
+                if now.duration_since(at) <= window {
+                    mods |= MOD_SHIFT;
+                }
+            }
+        }
+        mods
     }
 }
 
@@ -121,6 +200,8 @@ pub fn match_hotkey(key: PrimaryKey, mods: u8) -> Option<Hotkey> {
 /// 用户的要求:
 /// > 「触发之后 Ctrl+D 整个按键就不再会继续影响它了,
 /// > 除非下一次重新按住 Ctrl,再点击相应的字母」
+///
+/// (2026-10-25 起剪贴板直入的键改成了 **⌃⇧D**,规则本身不变。)
 ///
 /// 也就是说:**触发一次就被"消费掉"** —— 之后 Control 还按着、字母再按
 /// 也不触发;**必须松开 Control 再重新按住**,才重新武装。
@@ -282,14 +363,26 @@ mod tests {
 
     // ── 判定 ───────────────────────────────────────────────────────
 
-    /// ⌃S / ⌃D 要认得出来 —— **只要 Control 在位**就行。
+    /// ⌃S 只要 Control;**⌃⇧D 要 Control + Shift**(2026-10-25 改口径)。
     #[test]
     fn 认得出两个快捷键() {
         assert_eq!(match_hotkey(PrimaryKey::S, CTRL), Some(Hotkey::Execute));
-        assert_eq!(match_hotkey(PrimaryKey::D, CTRL), Some(Hotkey::Paste));
+        assert_eq!(
+            match_hotkey(PrimaryKey::D, SHIFT | CTRL),
+            Some(Hotkey::Paste)
+        );
     }
 
-    /// 多带一个 Shift 也照样触发(容错),但**光有 Shift 不算**。
+    /// **⌃D(光 Control)不再触发** —— 剪贴板直入改成 **⌃⇧D**。
+    ///
+    /// 用户原话(2026-10-25):「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」。
+    /// 光按 ⌃D 时那个 D 必须**漏给前台应用**(它是普通输入,不是快捷键)。
+    #[test]
+    fn 光Control的D不再触发() {
+        assert_eq!(match_hotkey(PrimaryKey::D, CTRL), None);
+    }
+
+    /// ⌃S **多带一个 Shift 也照样触发**(容错),但**光有 Shift 不算**。
     #[test]
     fn 只认Control_Shift可有可无() {
         assert_eq!(
@@ -302,6 +395,52 @@ mod tests {
         );
         assert_eq!(match_hotkey(PrimaryKey::S, SHIFT), None);
         assert_eq!(match_hotkey(PrimaryKey::D, SHIFT), None);
+    }
+
+    // ── 粘滞窗口(顺序不限 / 间隔别太短)───────────────────────────────
+    //
+    // 窗口取模块末尾那个 `WINDOW`(两秒)—— 与「回头认」同一个值:
+    // 人手三键连按的间隔远小于这个量级。
+
+    /// 修饰键**在窗口内按下过**就算数 —— 哪怕它此刻已经松开。
+    ///
+    /// 这就是「三个键只要在一定时间内按了就能触发」的落点:
+    /// 先按 Shift 松开、再按 Control、最后按 D ⇒ 照样触发。
+    #[test]
+    fn 窗口内按下过的修饰键算数() {
+        let now = Instant::now();
+        let mut sticky = StickyModifiers::new();
+        sticky.note_press(SHIFT, now - Duration::from_millis(300));
+        sticky.note_press(CTRL, now - Duration::from_millis(100));
+        // 两个都松开了(此刻一个都没按住)
+        let mods = sticky.effective(0, now, WINDOW);
+        assert_eq!(mods & (CTRL | SHIFT), CTRL | SHIFT);
+        assert_eq!(
+            match_hotkey(PrimaryKey::D, mods),
+            Some(Hotkey::Paste),
+            "窗口内的 ⌃⇧D 应该触发"
+        );
+    }
+
+    /// **窗口外**按下过的修饰键**不算数** —— 十分钟前按过一下 Ctrl,
+    /// 不该让今天的一次 ⇧D 误触发。
+    #[test]
+    fn 窗口外按下过的不算数() {
+        let now = Instant::now();
+        let mut sticky = StickyModifiers::new();
+        sticky.note_press(SHIFT, now - Duration::from_millis(5000));
+        let mods = sticky.effective(0, now, WINDOW);
+        assert_eq!(mods & SHIFT, 0);
+        assert_eq!(match_hotkey(PrimaryKey::D, mods), None);
+    }
+
+    /// **此刻按着**的修饰键**永远算数**(不管按了多久)。
+    #[test]
+    fn 按着的修饰键永远算数() {
+        let now = Instant::now();
+        let sticky = StickyModifiers::new();
+        let mods = sticky.effective(CTRL | SHIFT, now, WINDOW);
+        assert_eq!(mods & (CTRL | SHIFT), CTRL | SHIFT);
     }
 
     /// **不认 Command** —— ⌘S 是「保存」、⌘D 是「书签」,不能抢。
@@ -465,10 +604,10 @@ mod tests {
             find_pending_hotkey(&pressed, to_primary, CTRL, now, WINDOW),
             Some((b'S', Hotkey::Execute))
         );
-        // D 同理
+        // D 同理(⌃⇧D:Control 之外还要 Shift)
         let pressed_d = vec![(b'D', now)];
         assert_eq!(
-            find_pending_hotkey(&pressed_d, to_primary, CTRL, now, WINDOW),
+            find_pending_hotkey(&pressed_d, to_primary, SHIFT | CTRL, now, WINDOW),
             Some((b'D', Hotkey::Paste))
         );
     }
