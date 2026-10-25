@@ -201,6 +201,12 @@ function App() {
   // 读剪贴板走**原生**通道(`cnc.clipboardReadText()` → Win32 `OpenClipboard` /
   // Electron `clipboard`):WebView2 里的 `navigator.clipboard.readText()` 有可能
   // 因为焦点/权限直接失败,原生通道不挑这些。
+  //
+  // ⚠️ **键入必须走 3 秒倒计时**(和「开始输入」同一个函数),不能立刻键入:
+  // 点我们按钮的那一刻,焦点在**我们自己的窗口**里。立刻键入 ⇒ 字打进了
+  // 我们的界面,而不是用户想输入的目标软件。
+  // (全局快捷键那条路不一样:macOS 的 ⌃D 是**目标软件**在前台时按的,焦点本来
+  //  就在那边,所以它可以立刻键入。)
   const requestPasteFromClipboard = () => {
     setMessage('读取剪贴板中...')
     Promise.resolve(cnc.clipboardReadText?.())
@@ -211,12 +217,7 @@ function App() {
           setTimeout(() => setMessage(''), 2000)
           return
         }
-        cnc.pinyinInput(t, 0, false)
-          .then((data) => {
-            setMessage(data?.status === 'success' ? '开始输入' : (data?.message || '输入失败'))
-            setTimeout(() => setMessage(''), 2000)
-          })
-          .catch(() => setMessage('输入请求失败'))
+        requestPinyinInput(t)
       })
       .catch(() => {
         setMessage('无法读取剪贴板')

@@ -401,6 +401,13 @@ async function probeLayout(page) {
       const pasted = await page.evaluate(() => window.__pinyinInputs);
       check('「从剪贴板读入并键入」真把剪贴板里的文字送进了键入通道',
         pasted.some((p) => p[0] === '来自剪贴板的文字'), JSON.stringify(pasted));
+      // ⚠️ 必须**等 3 秒**再键入,不能立刻:
+      // 点我们按钮的那一刻,焦点在**我们自己的窗口**里 —— 立刻键入的话,
+      // 字会打进我们自己的界面,而不是用户想输入的目标软件。
+      check('「从剪贴板读入并键入」带 3 秒倒计时(不是立刻键入)',
+        pasted.some((p) => p[0] === '来自剪贴板的文字' && p[1] === 3), JSON.stringify(pasted));
+      check('界面上有倒计时提示(用户要时间去把光标移到目标位置)',
+        (await probe(page)).text.includes('秒后开始输入'));
 
       await page.close();
     }
