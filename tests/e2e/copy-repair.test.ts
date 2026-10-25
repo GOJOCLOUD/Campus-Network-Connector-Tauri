@@ -26,7 +26,12 @@ import {
   sleep,
 } from './harness.mjs';
 
-const EXTENSION = resolve(ROOT, 'dist/chromium');
+// 扩展产物的目录 —— 与 `tools/build.mjs chromium` 的输出一致。
+//
+// ⚠️ 这里原来写的是 `dist/chromium`,而构建脚本输出到 **`dist-core/chromium`**
+// (`dist/` 是 vite 的前端产物目录)⇒ 这条用例**从来没跑通过**,
+// 于是「扩展到底能不能把密文还原成明文」一直没人验证过。
+const EXTENSION = resolve(ROOT, 'dist-core/chromium');
 const EXPECT = JSON.parse(readFileSync(resolve(ROOT, 'tests/fixtures/expectations.json'), 'utf8'));
 
 let site;

@@ -11,6 +11,7 @@
 
 import { collectRuns, type RunCollector } from '../../../core/src/copy/selection.ts';
 import { scopeFromStyle, scopeKey, type FontScope } from '../../../core/src/font-analysis/scope.ts';
+import { REFERENCE_GRID_SIZE } from '../../../core/src/glyph-matching/grid.ts';
 import { GlyphRenderer, toBase64 } from './render/glyph-renderer.ts';
 
 export interface ProbeScope {
@@ -29,7 +30,8 @@ export interface ProbeResult {
   hasSelection: boolean;
 }
 
-const renderer = new GlyphRenderer(32);
+// 栅格尺寸必须与参考库一致（REFERENCE_GRID_SIZE），否则送过去的位图与库里的字形错位。
+const renderer = new GlyphRenderer(REFERENCE_GRID_SIZE);
 
 function collector(): RunCollector {
   return {

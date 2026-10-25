@@ -10,6 +10,7 @@
  */
 
 import { blur } from '../../../../core/src/glyph-matching/raster.ts';
+import { REFERENCE_GRID_SIZE } from '../../../../core/src/glyph-matching/grid.ts';
 import { cssFontShorthand, type FontScope } from '../../../../core/src/font-analysis/scope.ts';
 
 /** 探测用字符：用于计算字体指纹，检测字体是否被替换。 */
@@ -30,7 +31,12 @@ export class GlyphRenderer {
   private ctx: CanvasRenderingContext2D | null = null;
   private cache = new Map<string, RenderResult>();
 
-  constructor(size = 32, scale = 4) {
+  /**
+   * @param size 精细栅格边长 —— **必须等于参考库的 gridSize**，
+   *   否则送进匹配器的位图与库里的字形错位，比较结果全是噪声。
+   *   默认取 `REFERENCE_GRID_SIZE`（48），别手写别的数字。
+   */
+  constructor(size = REFERENCE_GRID_SIZE, scale = 4) {
     this.size = size;
     this.scale = scale;
     this.renderSize = size * scale;
@@ -71,7 +77,10 @@ export class GlyphRenderer {
     };
 
     const target = draw(cssFontShorthand(scope, size));
-    const control = draw('32px "__copyrepair_missing_family__"');
+    // 对照组必须与目标**同字号**：control 用的是默认字体（字体名不存在 ⇒ 回落），
+    // target 用的是页面字体。字号不同 ⇒ 两个字形缩放不同 ⇒ 逐像素必然有差，
+    // 于是"目标字体根本不存在"也会被判成 fallback=false（早先的 bug）。
+    const control = draw(`${size}px "__copyrepair_missing_family__"`);
 
     // 面积平均降采样到参考库栅格
     const grid = this.size;

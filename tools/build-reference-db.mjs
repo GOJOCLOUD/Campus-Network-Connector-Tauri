@@ -94,7 +94,7 @@ export function buildCharset() {
 
 async function main() {
   const fontPath = resolve(arg('font', resolve(root, 'tools/reference-fonts/NotoSansSC-Regular.otf')));
-  const size = Number(arg('size', '32'));
+  const size = Number(arg('size', '48'));
   // 默认产物名带栅格尺寸，避免出现"48×48 的库却叫 glyph-db.crdb"
   const outPath = resolve(arg('out', resolve(root, `tools/reference-fonts/glyph-db-${size}.crdb`)));
   const coarse = Number(arg('coarse', '8'));

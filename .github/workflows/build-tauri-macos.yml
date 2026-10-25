@@ -50,6 +50,20 @@ jobs:
       - name: page-guard regression test
         run: node --test tools/verify/verify-page-guard.cjs
 
+      # 硬门禁:共享代码的两条不变量(跑不过就不发包)。
+      #
+      # ① 字形渲染的**栅格尺寸**必须与参考字形库一致 ——
+      #    不一致 ⇒ 送进匹配器的位图与库里的字形**错位** ⇒ 最近邻全是噪声
+      #    (实测落到「爫」「﹊」这类符号上,margin≈0)⇒ 永远判不出混淆
+      #    ⇒ 复制出来还是密文,**而且全程不报错**。
+      #    2026-10-25 实测踩过:渲染器 32×32、库 48×48。
+      #
+      # ② 扩展 ID 必须在 manifest / Rust / JS / 产物四处**算成同一个值** ——
+      #    算错 ⇒ 注册表写到一把**没人认的键**上 ⇒ 开关显示「已接管」,
+      #    浏览器里什么都没有(同样不报错)。
+      - name: Glyph grid + extension ID gates
+        run: node --test tools/verify/verify-glyph-grid.cjs tools/verify/verify-extension-id.cjs
+
       # 硬门禁:界面层的回归(跑不过就不发包)。
       # - 换页时内容区**底下**那条横向滚动条不许再出现
       #   (用户反馈「下面有个滑条在滑动」),画面横滑的动画不许丢;
@@ -58,6 +72,24 @@ jobs:
       # 这两条要读**构建出来的 dist/**(真正装进 App 的那份前端),
       # 所以必须放在 "Build frontend" 之后。
       - name: UI regression test
+      # 硬门禁:浏览器修复扩展的**端到端**(跑不过就不发包)。
+      #
+      # 这是**唯一**能证明「网页上复制出来是明文」的用例 ——
+      # 2026-10-25「浏览器修复是失效的」就是它**没进 CI** 才漏出去的。
+      #
+      # 它要真实 Chrome + 系统剪贴板 ⇒ 只能跑在 macOS runner 上
+      # (Windows runner 的剪贴板在 session 0 里,读不到 ⇒ 那边靠静态门禁)。
+      #
+      # 字形库直接用**仓库里已入库的那份**(tauri-app/src-tauri/resources/…),
+      # 不用现场重建:重建要栅格化 GBK 全集,慢且没必要。
+      - name: Chromium extension build + e2e test
+        shell: bash
+        run: |
+          mkdir -p vendor
+          cp tauri-app/src-tauri/resources/glyph-db-48.crdb.gz vendor/glyph-db-48.crdb.gz
+          node tools/build.mjs chromium
+          node --test tools/verify/verify-chromium-extension.cjs
+          npm run test:e2e
         run: node --test tools/verify/verify-panel-transition.cjs tools/verify/verify-recording-ui.cjs
 
       # 硬门禁:平台界面自检(跑不过就不发包)。
