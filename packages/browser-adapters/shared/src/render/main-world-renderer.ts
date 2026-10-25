@@ -43,6 +43,19 @@ import type { FontScope } from '../../../core/src/font-analysis/scope.ts';
 export const RENDER_REQUEST_EVENT = 'copy-repair:render-request';
 /** 主世界 → 隔离世界:渲染结果。 */
 export const RENDER_RESPONSE_EVENT = 'copy-repair:render-response';
+/**
+ * 主世界 → 隔离世界:页面字体加载完成。
+ *
+ * 为什么需要它:字体晚到时,扩展在**隔离世界**里第一次画出来的是回退字体
+ * ⇒ 那一轮判定「没被混淆」⇒ 用户复制出来还是密文。
+ * 让隔离世界在字体到位后重新分析一次,才能自愈。
+ *
+ * 为什么由主世界广播:主世界一定能拿到页面的 `document.fonts`
+ * ⇒ 一定收得到 `loadingdone`。隔离世界能不能收到取决于引擎
+ * (Chromium 实测**能**收到,`document.fonts.size === 1`),
+ * 所以两条路都留着,互为保险。
+ */
+export const FONTS_LOADED_EVENT = 'copy-repair:fonts-loaded';
 
 export interface RenderRequestDetail {
   /** 随机 token:响应必须原样带回,否则丢弃 */
@@ -76,6 +89,17 @@ export interface RenderResponseDetail {
 export function installMainWorldRenderer(): void {
   // 栅格尺寸必须与参考库一致（REFERENCE_GRID_SIZE），否则位图错位、匹配全是噪声。
   const renderer = new GlyphRenderer(REFERENCE_GRID_SIZE);
+  // 页面字体加载完成 ⇒ 广播给隔离世界，让它重新分析一次。
+  // （隔离世界在 Chromium 里也能收到 loadingdone，这条是跨引擎的保险。）
+  if (typeof document !== 'undefined' && document.fonts) {
+    document.fonts.addEventListener('loadingdone', () => {
+      try {
+        document.dispatchEvent(new CustomEvent(FONTS_LOADED_EVENT, { detail: { at: Date.now() } }));
+      } catch {
+        /* 广播失败不影响主流程 */
+      }
+    });
+  }
   document.addEventListener(
     RENDER_REQUEST_EVENT,
     (event) => {

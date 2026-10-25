@@ -16,7 +16,7 @@ import { scopeFromStyle, scopeKey, type FontScope } from '../../../core/src/font
 import { decideChar, decideScope, type GlyphCandidate } from '../../../core/src/glyph-matching/policy.ts';
 import type { Logger } from '../../../core/src/diagnostics/logger.ts';
 
-import { MainWorldRendererClient } from './render/main-world-renderer.ts';
+import { FONTS_LOADED_EVENT, MainWorldRendererClient } from './render/main-world-renderer.ts';
 import {
   INTENT_EVENT,
   type BackgroundRequest,
@@ -24,6 +24,19 @@ import {
   type CopyIntent,
   type MatchResultItem,
 } from './protocol.ts';
+
+/** 页面字体还没加载完时的首轮重试间隔（毫秒）。 */
+const FALLBACK_RETRY_MS = 300;
+/** 重试间隔上限（毫秒）—— 后面的重试按 1.5 倍拉长，但不超过这个值。 */
+const FALLBACK_RETRY_MAX_MS = 2000;
+/**
+ * 最多重试几次（页面根本没有那个字体时不能无限重试）。
+ *
+ * 8 次 + 上面那个退避曲线 ⇒ 总窗口约 **10 秒**：
+ * 300 + 450 + 675 + 1012 + 1519 + 2000 + 2000 + 2000。
+ * 网页字体慢到这个程度还没到，就当它不存在（宁可不改，不可写错字）。
+ */
+const MAX_FALLBACK_RETRIES = 8;
 
 export interface CharMapping {
   /** 参考库最近邻码位（原始值，未经过阈值过滤） */
@@ -69,8 +82,41 @@ export class ContentRuntime {
   private readonly debounceMs: number;
   private readonly maxCharsPerRequest: number;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 字体没加载完时的重试定时器 */
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 连续重试了几次(防止无限重试) */
+  private fallbackRetries = 0;
   private intentSeq = 0;
-  private stats = { copyEvents: 0, repairs: 0, unresolved: 0, requests: 0, matchedChars: 0, rawCopyEvents: 0 };
+  private stats = {
+    copyEvents: 0,
+    repairs: 0,
+    unresolved: 0,
+    requests: 0,
+    matchedChars: 0,
+    rawCopyEvents: 0,
+    /** 最近一次分析里「画成了回退字体」的字符数（>0 ⇒ 字体当时还没到位） */
+    fallbackChars: 0,
+    /** 因为字体没到位而触发的重试次数 */
+    fontRetries: 0,
+    /**
+     * 诊断：隔离世界能看到的网页字体数量。
+     *
+     * -1 = 拿不到 `document.fonts`;0 = 拿得到但页面还没注册字体;
+     * >0 = 隔离世界**也**能看到页面的 `@font-face`。
+     *
+     * ⚠️ 实测（2026-10-25，Chromium）：隔离世界的 `document.fonts.size === 1`
+     * ⇒ **不是空的**（早先「隔离世界 document.fonts 为空」的判断是错的）。
+     * 但隔离世界的 canvas 仍然画不出页面的 webfont（逐像素探针：与「一个
+     * 不存在的字体」完全一致）⇒ **字形渲染仍然必须放在主世界**。
+     */
+    isolatedFontFaces: -1,
+    /** 诊断：隔离世界看到的那些字体的状态（loaded / unloaded / error） */
+    isolatedFontStatus: '',
+    /** 诊断：selectionchange 触发次数 */
+    selectionChanges: 0,
+    /** 诊断：真正跑过的分析轮数 */
+    analysisRuns: 0,
+  };
   private debugScope: unknown = null;
 
   constructor(options: ContentRuntimeOptions) {
@@ -86,7 +132,30 @@ export class ContentRuntime {
     }, true);
     window.addEventListener('copy', (event) => this.onCopy(event), true);
     window.addEventListener('copy', (event) => this.onCopyBubble(event), false);
-    document.addEventListener('selectionchange', () => this.scheduleAnalyze());
+    document.addEventListener('selectionchange', () => {
+      this.stats.selectionChanges += 1;
+      this.scheduleAnalyze();
+    });
+    // 网页字体**晚到**时要重新分析一次 ——
+    // 字体没到之前画出来的是回退字体,那次判定是「没被混淆」,
+    // 如果就此定死,用户在字体加载前选字 ⇒ 复制出来就是密文。
+    // (2026-10-25 在 CI 上实测到:字体加载慢一点就复现。)
+    //
+    // 三条通知来源(任何一条都能触发重新分析):
+    //  1) 主世界广播的 `copy-repair:fonts-loaded` —— 精确(字体真的到位了才发);
+    //     不依赖隔离世界能不能拿到 FontFaceSet,所以最通用。
+    //  2) 隔离世界自己的 `loadingdone` —— Chromium 实测能收到
+    //     (隔离世界的 `document.fonts.size === 1`),比 1) 快一点点。
+    //  3) 轮询兜底(`scheduleRetry`) —— 上面两条都没来时也能自愈。
+    document.addEventListener(FONTS_LOADED_EVENT, () => {
+      this.logger.debug('fonts-loaded');
+      // 字体到位了 ⇒ 重试预算重置(下一轮没到位可以重新开始数)。
+      this.fallbackRetries = 0;
+      this.scheduleAnalyze();
+    }, true);
+    if (typeof document !== 'undefined' && document.fonts) {
+      document.fonts.addEventListener('loadingdone', () => this.scheduleAnalyze());
+    }
     this.logger.info('runtime-started');
   }
 
@@ -127,6 +196,7 @@ export class ContentRuntime {
   }
 
   private async analyzeSelection(): Promise<void> {
+    this.stats.analysisRuns += 1;
     const current = this.currentRuns();
     if (!current) return;
 
@@ -148,6 +218,10 @@ export class ContentRuntime {
     // bitmap 走两用：base64 发给后台做匹配，raw 留在本地做"字体变了没"的比对
     const pendingItems: Array<{ scopeKey: string; char: string; bitmap: string; raw: Uint8Array }> = [];
     const touchedScopes: ScopeCache[] = [];
+    /** 这一轮里有没有作用域的字体**还没加载完** */
+    let needRetry = false;
+    /** 这一轮里画成了回退字体的字符数（诊断用：>0 ⇒ 字体当时还没到位） */
+    let fallbackChars = 0;
 
     for (const { scope, chars } of byScope.values()) {
       const key = scopeKey(scope);
@@ -177,20 +251,32 @@ export class ContentRuntime {
       }
       touchedScopes.push(cache);
 
+      let sawFallback = false;
       for (const item of rendered.items) {
         if (item.fallback) {
-          // 该字符没命中目标字体（可能是回退字体），不参与映射
+          // 该字符没命中目标字体(页面字体**还没加载完**,画的是回退字体)
+          // ⇒ 不参与映射,而且**这一轮的判定不作数**:过一会儿字体到了要重来。
+          sawFallback = true;
+          fallbackChars += 1;
           continue;
         }
         const existing = cache.chars.get(item.char);
         if (existing && sameBitmap(existing.bitmap, item.bitmap)) continue;
         pendingItems.push({ scopeKey: key, char: item.char, bitmap: item.base64, raw: item.bitmap });
       }
+      if (sawFallback) {
+        // 这个作用域的字体还没到 ⇒ 稍后重试(见 scheduleRetry)
+        needRetry = true;
+      }
     }
+
+    if (!needRetry) this.fallbackRetries = 0;
+    this.stats.fallbackChars = fallbackChars;
 
     if (pendingItems.length === 0) {
       this.updateScopeDecisions(touchedScopes);
       this.publishStats();
+      if (needRetry) this.scheduleRetry();
       return;
     }
 
@@ -205,6 +291,38 @@ export class ContentRuntime {
       this.logger.warn('match-request-failed', { error: String(error) });
     }
     this.publishStats();
+    if (needRetry) this.scheduleRetry();
+  }
+
+  /**
+   * 页面字体**还没加载完** ⇒ 过一会儿重新分析。
+   *
+   * 为什么必须有:字体没到之前,canvas 画出来的是**回退字体**
+   * ⇒ 那一轮会判定「这个作用域没被混淆」⇒ 如果就此定死,
+   * 用户在网页字体加载完成**之前**选字,复制出来就是密文。
+   * (2026-10-25 在 CI 上实测到这个:字体加载慢一点就复现。)
+   *
+   * 这是**兜底**手段:主世界广播(字体真到位才发)与隔离世界自己的
+   * `loadingdone` 是更快的两条路;本条保证「那两条都没来」时也能自愈。
+   *
+   * 次数有上限(MAX_FALLBACK_RETRIES)—— 页面根本没有那个字体时,
+   * 不能无限重试。
+   */
+  private scheduleRetry(): void {
+    if (this.fallbackRetries >= MAX_FALLBACK_RETRIES) return;
+    // 退避:越往后间隔越长(字体慢到几秒才到是常态),
+    // 但总窗口封顶约 10 秒。
+    const delay = Math.min(
+      FALLBACK_RETRY_MS * Math.pow(1.5, this.fallbackRetries),
+      FALLBACK_RETRY_MAX_MS,
+    );
+    this.fallbackRetries += 1;
+    this.stats.fontRetries += 1;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.analyzeSelection();
+    }, delay);
   }
 
   private applyResults(
@@ -402,6 +520,14 @@ export class ContentRuntime {
       entries += cache.chars.size;
       if (cache.obfuscated) obfuscated += 1;
     }
+    this.stats.isolatedFontFaces =
+      typeof document !== 'undefined' && document.fonts ? document.fonts.size : -1;
+    this.stats.isolatedFontStatus =
+      typeof document !== 'undefined' && document.fonts
+        ? Array.from(document.fonts)
+            .map((f) => `${f.family}:${f.status}`)
+            .join(',')
+        : 'none';
     return {
       ...this.stats,
       scopes: this.scopes.size,

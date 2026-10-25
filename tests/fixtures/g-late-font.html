@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>测试 G：网页字体晚到</title>
+<style>
+  body { font: 16px/1.8 "PingFang SC", sans-serif; margin: 24px; }
+  /* 故意**不在** <style> 里写 @font-face —— 下面用脚本晚一点注入，
+     模拟真实网页「字体晚到」的情况（用户可能先选字、后加载完）。 */
+  #target { font-family: "ObfA"; font-size: 22px; }
+</style>
+</head>
+<body>
+<h1>测试 G：字体规则晚注入</h1>
+<p id="target">天地玄黄宇宙洪荒日月盈昃</p>
+<script>
+  // 1500ms 之后才把 @font-face 规则插进去 ⇒ 字体晚到。
+  // 扩展必须能发现「刚才那次判定是拿回退字体画的」并自动重新分析，
+  // 否则用户在字体到位之后复制，出来的还是密文。
+  window.__lateFontReady = false;
+  setTimeout(function () {
+    var style = document.createElement('style');
+    style.textContent =
+      '@font-face { font-family: "ObfA"; src: url("./fonts/obf-same-style.ttf") format("truetype"); }';
+    document.head.appendChild(style);
+    window.__lateFontReady = true;
+  }, 2000);
+</script>
+</body>
+</html>
