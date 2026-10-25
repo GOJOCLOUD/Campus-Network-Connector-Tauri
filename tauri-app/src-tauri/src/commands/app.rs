@@ -722,6 +722,16 @@ pub fn get_native_status() -> Result<serde_json::Value, String> {
         // 发合成点击/按键需要 macOS 的「辅助功能」权限;
         // 没有的话事件会被系统静默丢弃(命令返回成功,但什么都没发生)。
         "accessibilityTrusted": super::native::accessibility_trusted(),
+        // 全局快捷键:**抢到了没有**。
+        //
+        // ⌃D 是我们**要抢**的那个(抢到手,别的软件才收不到 Ctrl+D,
+        // 那个软件就不会被"退出")。但系统不会让两个进程同时拥有同一个组合键
+        // ⇒ 别的软件先注册的话我们就抢不到。
+        //
+        // 这一栏就是为了让「抢没抢到」变成**看得见的事实**:
+        // 抢不到时界面上要显示出来,而不是让你以为「按了没反应」是系统的问题。
+        "globalShortcutsEnabled": true,
+        "shortcutPasteRegistered": crate::shortcut_paste_registered(),
         // 窗口贴合内容时**实际**改过几次原生窗口尺寸(诊断用)。
         // 改一次 = 一次 WebView 整页重排;这个数一多就是肉眼可见的卡顿。
         "fitResizes": crate::FIT_RESIZE_COUNT.load(std::sync::atomic::Ordering::Relaxed),

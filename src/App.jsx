@@ -192,39 +192,6 @@ function App() {
       .catch(() => { setMessage('请求失败'); setPinyinCountdown(0) })
   }
 
-  // 「从剪贴板读入并键入」—— 这个能力原来挂在**全局快捷键 ⌃D** 上。
-  //
-  // Windows 线**不再注册任何全局快捷键**(2026-10-24 用户口径:⌃D 是 Windows 的
-  // 系统默认键,抢过来会让用户自己开的软件被直接关掉)⇒ 能力搬到界面上,
-  // 不丢功能、也不占系统快捷键。
-  //
-  // 读剪贴板走**原生**通道(`cnc.clipboardReadText()` → Win32 `OpenClipboard` /
-  // Electron `clipboard`):WebView2 里的 `navigator.clipboard.readText()` 有可能
-  // 因为焦点/权限直接失败,原生通道不挑这些。
-  //
-  // ⚠️ **键入必须走 3 秒倒计时**(和「开始输入」同一个函数),不能立刻键入:
-  // 点我们按钮的那一刻,焦点在**我们自己的窗口**里。立刻键入 ⇒ 字打进了
-  // 我们的界面,而不是用户想输入的目标软件。
-  // (全局快捷键那条路不一样:macOS 的 ⌃D 是**目标软件**在前台时按的,焦点本来
-  //  就在那边,所以它可以立刻键入。)
-  const requestPasteFromClipboard = () => {
-    setMessage('读取剪贴板中...')
-    Promise.resolve(cnc.clipboardReadText?.())
-      .then((text) => {
-        const t = (text || '').trim()
-        if (!t) {
-          setMessage('剪贴板是空的')
-          setTimeout(() => setMessage(''), 2000)
-          return
-        }
-        requestPinyinInput(t)
-      })
-      .catch(() => {
-        setMessage('无法读取剪贴板')
-        setTimeout(() => setMessage(''), 2000)
-      })
-  }
-
   // 录制中每 0.1s 拉取一次坐标
   useEffect(() => {
     let interval
@@ -627,9 +594,15 @@ function App() {
     name,
     onNameChange: setName,
     onPinyinInput: (text) => requestPinyinInput(text || ''),
-    // 「从剪贴板读入并键入」:原 ⌃D 全局快捷键撤掉后,这个能力从这里进。
-    onPasteFromClipboard: () => requestPasteFromClipboard(),
     onClearText: () => setName(''),
+    // ⌃D **抢没抢到**必须看得见(2026-10-24 用户口径:
+    // 「怎么保证它使用的是你的功能而不是系统功能」)。
+    // 抢不到 ⇒ 那个组合键被别的软件先注册了 ⇒
+    // ① 按它**不会触发我们**;② 目标软件自己的 Ctrl+D 也**照常生效**
+    // (所以那个软件还是会被它的「退出」关掉)—— 这两件都要让用户知道。
+    shortcutNotice: (nativeStatus && nativeStatus.shortcutPasteRegistered === false)
+      ? 'Ctrl+D 没抢到(这个组合键被别的软件先注册了):按它不会触发我们,目标软件自己的 Ctrl+D 也会照常生效。'
+      : '',
     pinyinCountdown,
     message,
     featureList,
@@ -700,15 +673,18 @@ function App() {
           /* macOS 用原生红绿灯(见 main.js 的 titleBarStyle/trafficLightPosition),
              这里只给没有原生按钮的平台兜底。
 
-             Windows 线自绘**三个**按钮(2026-10-24 用户口径:
-             「右上角做一个三个按钮,就是最大化最小化或者说直接关掉,
-               别只留一个关掉的按钮」):
-             最小化 / 最大化(再点一次还原)/ 关闭。
+             Windows 线自绘**四个**按钮(2026-10-24 用户口径:
+             「你加一个最小化,加一个关闭,加一个最大化,别他妈就只留小叉,
+               让小叉变成放在后台,那不然人家真正想关软件还得点两次」):
 
-             ⚠️ 「关闭」**不是退出**:它只是把窗口**藏起来**,进程留着
-             (用户口径:「点叉他就直接完全退出了,这个他要在后台挂着,
-             功能依然生效」)。唤回靠**托盘图标**(或再运行一次程序),
-             彻底退出靠**托盘菜单的「退出程序」**。 */
+             - **最小化** / **最大化**(再点一次还原);
+             - **关闭软件** = 彻底退出进程 —— **一次点击就退**,
+               不用先去托盘再点一次;
+             - **小叉** = **放到后台**(窗口藏起来,进程留着,功能继续生效)
+               —— 小叉**不是退出**。
+
+             放到后台之后:托盘图标(左键)把窗口叫回来,
+             托盘右键「退出程序」彻底退出。 */
           !isMac && (
             <div className="flex items-center gap-0.5">
               <button
@@ -735,9 +711,21 @@ function App() {
               </button>
               <button
                 type="button"
+                onClick={() => cnc.quit?.()}
+                title="关闭软件（彻底退出程序）"
+                aria-label="关闭软件"
+                className="h-6 w-6 flex items-center justify-center rounded text-gray-400 hover:bg-red-50 hover:text-red-600 transition"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M12 3v9" />
+                  <path d="M18.4 6.6a9 9 0 1 1-12.8 0" />
+                </svg>
+              </button>
+              <button
+                type="button"
                 onClick={() => cnc.hide?.()}
-                title="关闭窗口（程序留在后台运行；托盘图标可以叫回来）"
-                aria-label="关闭"
+                title="放到后台（程序继续运行；托盘图标可以叫回来）"
+                aria-label="放到后台"
                 className="h-6 w-6 flex items-center justify-center rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition"
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">

@@ -55,10 +55,10 @@ function serveDist() {
 function stub(platform, accessibilityTrusted = false, nativeStatus = null) {
   const status = nativeStatus || { ok: true, platform, accessibilityTrusted };
   return `(function () {
-    // 窗口动作的**调用记录**:用来断言右上角那三个按钮各自调了什么
-    // (特别是「关闭」必须调 hide 而不是 quit —— 那是「后台挂着」的关键)。
+    // 窗口动作的**调用记录**:用来断言右上角那四个按钮各自调了什么
+    // (「关闭软件」= quit 一次点击真退出;「放到后台」= hide 进程留着)。
     window.__winCalls = [];
-    // 键入请求的记录:用来断言「从剪贴板读入并键入」真把剪贴板的字送进去了。
+    // 键入请求的记录:用来断言「开始输入」带 3 秒倒计时。
     window.__pinyinInputs = [];
     window.cnc = {
       platform: ${JSON.stringify(platform)},
@@ -347,10 +347,14 @@ async function probeLayout(page) {
       check('Windows 不显示授权小问号(Windows 没有「辅助功能」这回事)', !winBadge);
       check('Windows 界面上没有橙色大横幅', !winStep2.text.includes('未获得「辅助功能」权限'));
 
-      // ── 右上角必须是**三个**按钮:最小化 / 最大化 / 关闭 ──
+      // ── 右上角必须是**四个**按钮:最小化 / 最大化 / 关闭软件 / 放到后台 ──
       //
-      // 2026-10-24 用户口径:「把它右上角做一个三个按钮,就是最大化最小化
-      // 或者说直接关掉,别只留一个关掉的按钮」。
+      // 2026-10-25 用户口径:「你加一个最小化,加一个关闭,加一个最大化,
+      // 别他妈就只留小叉,让小叉变成放在后台,那不然人家真正想关软件还得点两次」。
+      //
+      // - **最小化** / **最大化**(再点一次还原);
+      // - **关闭软件** = 彻底退出(一次点击就退,不用先去托盘再点一次);
+      // - **小叉 = 放到后台**(窗口藏起来、进程留着,功能继续生效)。
       const corner = await page.evaluate(() => {
         const host = [...document.querySelectorAll('.app-nodrag')].find((d) => {
           const c = typeof d.className === 'string' ? d.className : '';
@@ -362,17 +366,19 @@ async function probeLayout(page) {
           title: b.getAttribute('title') || '',
         }));
       });
-      check('Windows 右上角有 3 个按钮', corner && corner.length === 3,
+      check('Windows 右上角有 4 个按钮', corner && corner.length === 4,
         corner ? corner.map((b) => b.aria).join(',') : '没找到右上角按钮组');
-      check('三个按钮是「最小化 / 最大化 / 关闭」',
-        corner && corner.map((b) => b.aria).join(',') === '最小化,最大化,关闭',
+      check('四个按钮是「最小化 / 最大化 / 关闭软件 / 放到后台」',
+        corner && corner.map((b) => b.aria).join(',') === '最小化,最大化,关闭软件,放到后台',
         corner ? corner.map((b) => b.aria).join(',') : '');
 
-      // 点这三个按钮,看它们各自调的是哪个窗口动作。
+      // 点这四个按钮,看它们各自调的是哪个窗口动作。
       //
-      // 关键一条:**「关闭」必须是 hide 而不是 quit** ——
-      // quit = 直接退进程(用户不接受:「他就直接完全退出了」),
-      // hide = 只把窗口藏起来,进程留着(「要在后台挂着,功能依然生效」)。
+      // 关键两条:
+      // - 「**关闭软件**」必须调 **quit** —— 一次点击就真退出
+      //   (用户口径:「人家真正想关软件还得点两次」⇒ 不能让他先去托盘再点一次);
+      // - 「**放到后台**」(小叉)必须调 **hide** —— 窗口藏起来、进程留着
+      //   (用户口径:「要在后台挂着,功能依然生效」)⇒ 小叉**不是退出**。
       await page.evaluate(() => {
         const host = [...document.querySelectorAll('.app-nodrag')].find((d) => {
           const c = typeof d.className === 'string' ? d.className : '';
@@ -381,34 +387,93 @@ async function probeLayout(page) {
         [...host.querySelectorAll('button')].forEach((b) => b.click());
       });
       const calls = await page.evaluate(() => window.__winCalls);
-      check('三个按钮分别调 minimize / maximize / hide',
-        JSON.stringify(calls) === JSON.stringify(['minimize', 'maximize', 'hide']),
+      check('四个按钮分别调 minimize / maximize / quit / hide',
+        JSON.stringify(calls) === JSON.stringify(['minimize', 'maximize', 'quit', 'hide']),
         JSON.stringify(calls));
-      check('「关闭」不是退出(没有调 quit)',
-        !calls.includes('quit'), JSON.stringify(calls));
+      check('「放到后台」(小叉)调的是 hide(不是退出),「关闭软件」才是 quit',
+        calls.includes('hide') && calls.filter((c) => c === 'quit').length === 1,
+        JSON.stringify(calls));
 
-      // ── 「从剪贴板读入并键入」:⌃D 全局键撤掉后,这个能力从这里进 ──
+      // ── 「从剪贴板读入并键入」按钮**已经撤掉**(2026-10-25 用户口径)──
       //
-      // 不只是"按钮在不在",还要**真能把剪贴板的字送进键入通道**。
-      check('「键盘输入」页有「从剪贴板读入并键入」按钮',
-        winStep2.text.includes('从剪贴板读入并键入'));
+      // 用户原话:「你这个界面本来就有开始输入这个按钮,只不过给了你三秒来定位光标在哪?
+      // 你现在多加个按钮进去,那跟普通的界面有什么区别?我现在就是要快捷键触发呀」。
+      //
+      // ⇒ 这个能力回到 **⌃D 全局快捷键**,界面上不再有第二个按钮。
+      check('界面上**没有**「从剪贴板读入并键入」按钮(这个能力回到 ⌃D 快捷键)',
+        !winStep2.text.includes('从剪贴板读入并键入'));
+      check('「开始输入（3s 后键入）」按钮还在(界面上唯一的输入入口)',
+        winStep2.text.includes('开始输入（3s 后键入）'),
+        winStep2.text.includes('开始输入') ? '' : '没找到「开始输入」按钮');
+      // 点它:必须**带 3 秒倒计时**。
+      // ⚠️ 点我们按钮的那一刻,焦点在**我们自己的窗口**里 —— 立刻键入的话,
+      // 字会打进我们自己的界面,而不是用户想输入的目标软件。
+      // (⌃D 全局键那条路不一样:它是**目标软件**在前台时按的,焦点本来就在那边,
+      //  所以它可以立刻键入。)
+      await page.evaluate(() => {
+        const ta = document.querySelector('textarea');
+        if (ta) {
+          const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(ta, '测试文字');
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+      await new Promise((r) => setTimeout(r, 200));
       await page.evaluate(() => {
         const btn = [...document.querySelectorAll('button')]
-          .find((b) => (b.textContent || '').includes('从剪贴板读入并键入'));
+          .find((b) => (b.textContent || '').includes('开始输入'));
         if (btn) btn.click();
       });
       await new Promise((r) => setTimeout(r, 300));
-      const pasted = await page.evaluate(() => window.__pinyinInputs);
-      check('「从剪贴板读入并键入」真把剪贴板里的文字送进了键入通道',
-        pasted.some((p) => p[0] === '来自剪贴板的文字'), JSON.stringify(pasted));
-      // ⚠️ 必须**等 3 秒**再键入,不能立刻:
-      // 点我们按钮的那一刻,焦点在**我们自己的窗口**里 —— 立刻键入的话,
-      // 字会打进我们自己的界面,而不是用户想输入的目标软件。
-      check('「从剪贴板读入并键入」带 3 秒倒计时(不是立刻键入)',
-        pasted.some((p) => p[0] === '来自剪贴板的文字' && p[1] === 3), JSON.stringify(pasted));
+      const typed = await page.evaluate(() => window.__pinyinInputs);
+      check('「开始输入」把内容送进键入通道',
+        typed.some((p) => p[0] === '测试文字'), JSON.stringify(typed));
+      check('「开始输入」带 3 秒倒计时(不是立刻键入)',
+        typed.some((p) => p[0] === '测试文字' && p[1] === 3), JSON.stringify(typed));
       check('界面上有倒计时提示(用户要时间去把光标移到目标位置)',
         (await probe(page)).text.includes('秒后开始输入'));
 
+      await page.close();
+    }
+
+    // ── ⌃D **抢没抢到**必须**看得见**(2026-10-25 用户口径)──
+    //
+    // 抢 ⌃D 的目的:在别的软件里按 Ctrl+D 时,那个软件**收不到**这个组合键,
+    // 于是它不会被自己的「退出」关掉。
+    //
+    // 但注册是**系统级独占**的:别的软件先注册了同一个组合键 ⇒ 我们**抢不到**。
+    // 抢不到时有两件事同时成立:
+    //   ① 按它**不会触发我们**;
+    //   ② 目标软件自己的 Ctrl+D **照常生效** ⇒ 那个软件还是会被它关掉。
+    // 这两件用户必须知道,否则只会觉得「按了没反应,是不是软件坏了」。
+    {
+      const page = await browser.newPage();
+      await page.evaluateOnNewDocument(stub('win32', false, {
+        ok: true, platform: 'win32', shortcutPasteRegistered: false,
+      }));
+      await page.goto(base, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, 600));
+      await gotoStep(page, 1);
+      const lost = await probe(page);
+      check('⌃D 没抢到 ⇒ 界面出现提示(说清楚按了不会触发我们)',
+        lost.text.includes('没抢到'), lost.text.includes('没抢到') ? '' : lost.text.slice(0, 160));
+      check('⌃D 没抢到的提示里说清了「目标软件自己的 Ctrl+D 照常生效」',
+        lost.text.includes('照常生效'), '');
+      await page.close();
+    }
+    // 抢到了 ⇒ **不该**出现那条提示(别一上来就吓人)
+    {
+      const page = await browser.newPage();
+      await page.evaluateOnNewDocument(stub('win32', false, {
+        ok: true, platform: 'win32', shortcutPasteRegistered: true,
+      }));
+      await page.goto(base, { waitUntil: 'networkidle0' });
+      await new Promise((r) => setTimeout(r, 600));
+      await gotoStep(page, 1);
+      const won = await probe(page);
+      check('⌃D 抢到了 ⇒ 界面没有那条提示',
+        !won.text.includes('没抢到'), '');
       await page.close();
     }
 
@@ -434,11 +499,15 @@ async function probeLayout(page) {
       await page.close();
     }
 
-    // ── Windows 线**不注册任何全局快捷键**(源码级断言)──
+    // ── Windows 线**只抢 ⌃D**,不抢 ⌃S(源码级断言)──
     //
-    // 2026-10-24 用户口径:⌃D 是 **Windows 的系统默认键** —— 我们抢过来,
-    // 用户在自己常用的软件里按 ⌃D 就会把那个软件/系统对话框**直接关掉**
-    // (用户原话:「不然他直接把软件退出了」)。⌃S 同理。
+    // 2026-10-25 用户口径:「干脆直接把系统的抢了,我的软件优先级最高……
+    // Ctrl 加 D 我发现在普通桌面它是退出软件的功能,那在使用这个的时候
+    // 没必要退出吧,所以就给他压制住」。
+    //
+    // - **⌃D** = 读剪贴板并键入 —— 我们抢的就是它(抢到手,别的软件就收不到);
+    // - **⌃S** = 默认执行(回放)—— Windows 上那一屏**已经没有界面了**
+    //   (ADR-0016),而 Ctrl+S 在别的软件里是「保存」⇒ **不抢**。
     //
     // 这条**只能在源码里查**:界面上看不出"系统里注册了哪些全局键"。
     {
@@ -446,18 +515,28 @@ async function probeLayout(page) {
         path.join(__dirname, '..', '..', 'tauri-app', 'src-tauri', 'src', 'lib.rs'),
         'utf8',
       );
-      // 注册清单由 `global_shortcut_keys()` 决定 —— 它必须是空的。
+      // 注册清单由 `global_shortcut_keys()` 决定 —— 它必须**只含 ⌃D**。
       const keysFn = libRs.match(/pub fn global_shortcut_keys\(\)[^{]*\{([^{}]*)\}/);
-      check('Tauri 的全局快捷键清单是空的(不占任何系统全局键)',
-        !!keysFn && /Vec::new\(\)/.test(keysFn[1]),
-        keysFn ? keysFn[1].trim() : '没找到 global_shortcut_keys()');
+      const keysBody = keysFn ? keysFn[1] : '';
+      check('Tauri 的全局快捷键清单里**有** ⌃D(要抢的就是它)',
+        /SHORTCUT_PASTE/.test(keysBody),
+        keysBody.trim() || '没找到 global_shortcut_keys()');
+      check('Tauri 的全局快捷键清单里**没有** ⌃S(默认执行:Windows 那屏已撤,且 Ctrl+S 是「保存」)',
+        !/SHORTCUT_DEFAULT_EXECUTE/.test(keysBody), keysBody.trim());
       // Control 按下/松开的轮询观察器**只为全局键的 latch 服务** ——
-      // 没有全局键就不该再跑这个 20ms 轮询。
+      // 抢了 ⌃D 就必须开着(不然按住 Ctrl 连按会连着触发,剪贴板被键入好几遍)。
       // (查的是**开关常量**,不是"调用点消失":调用点还在,被这个开关挡着。)
-      const observerOff = /HOTKEY_OBSERVER_ENABLED:\s*bool\s*=\s*false/.test(libRs);
-      check('Control 轮询观察器是关的(它只服务于全局键的 latch)',
-        observerOff,
-        observerOff ? 'HOTKEY_OBSERVER_ENABLED = false' : '没找到 HOTKEY_OBSERVER_ENABLED = false');
+      const observerOn = /HOTKEY_OBSERVER_ENABLED:\s*bool\s*=\s*true/.test(libRs);
+      check('Control 轮询观察器是开的(⌃D 的 latch 需要它)',
+        observerOn,
+        observerOn ? 'HOTKEY_OBSERVER_ENABLED = true' : '没找到 HOTKEY_OBSERVER_ENABLED = true');
+      // 「抢没抢到」要能被界面读到 ⇒ 原生状态里必须有这一栏。
+      const appRs = fs.readFileSync(
+        path.join(__dirname, '..', '..', 'tauri-app', 'src-tauri', 'src', 'commands', 'app.rs'),
+        'utf8',
+      );
+      check('原生状态里有「shortcutPasteRegistered」这一栏(界面靠它显示提示)',
+        /"shortcutPasteRegistered"/.test(appRs));
     }
   } finally {
     await browser.close();

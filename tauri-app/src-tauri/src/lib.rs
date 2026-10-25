@@ -262,6 +262,15 @@ fn registered_shortcuts() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 「⌃D」这个全局键**抢到了没有**(界面要用)。
+///
+/// 抢不到 = 别的软件先注册了同一个组合键 ⇒
+/// 我们的 ⌃D **不会触发**,而目标软件自己的 Ctrl+D 也**照常生效**
+/// (所以那个软件还是会被它自己的「退出」关掉)⇒ 必须让用户知道。
+pub fn shortcut_paste_registered() -> bool {
+    registered_shortcuts().iter().any(|k| k == SHORTCUT_PASTE)
+}
+
 #[tauri::command]
 fn window_quit(app: tauri::AppHandle) {
     // 退出前注销全局快捷键(Electron 版 before-quit 里 unregisterAll 同口径),
@@ -585,12 +594,12 @@ pub fn run() {
         }))
         // 全局快捷键插件。
         //
-        // ⚠️ **Windows 线一个全局键都不注册**(2026-10-24 用户口径,见
-        //    `register_global_shortcuts` 的文档):⌃D / ⌃S 都是 Windows 的
-        //    **系统默认键**,抢过来会让用户在自己常用的软件里按 ⌃D 就把那个
-        //    软件/系统对话框关掉(用户原话:「不然他直接把软件退出了」)。
-        //    ⇒ 这里注册的是**空列表**,下面的 handler 在 Windows 上**永远不会触发**;
-        //    留着它是给将来真要加全局键时用的(注册逻辑还在原处)。
+        // Windows 线抢 **⌃D**(读剪贴板并键入)——
+        // 抢到手,别的软件就收不到 Ctrl+D,那个软件也就不会被它的「退出」关掉
+        // (2026-10-24 用户口径:「干脆直接把系统的抢了,我的软件优先级最高」;
+        //  抢没抢到要**看得见** —— 见 `get_native_status` 的 `shortcutPasteRegistered`)。
+        // ⌃S(默认执行)**不抢**:Windows 上那一屏已经没有界面了,
+        // 而 Ctrl+S 在别的软件里是「保存」。
         //
         // macOS 走的是 `native::hotkey` 自己监听事件(匹配更宽松、能吃掉按键),
         // 不用这个插件。
@@ -750,14 +759,14 @@ pub fn run() {
             }
             #[cfg(target_os = "windows")]
             {
-                // Windows 线**不注册任何全局快捷键**(2026-10-24 用户口径)⇒
-                // 不需要 latch ⇒ 也就不需要 Control 的按下/松开观察器
-                // (那个线程每 20ms 轮询一次 `GetAsyncKeyState(VK_CONTROL)`,
-                //  白挂着只是白占 CPU —— 用户同期反馈「Windows 上有点偏卡顿」)。
+                // ⌃D 是**全局键** ⇒ latch 要用 ⇒ 观察 Control 的按下/松开
+                // (那个线程每 20ms 轮询一次 `GetAsyncKeyState(VK_CONTROL)`;
+                //  latch 靠它才解得开:触发一次之后必须松开 Control 才重新武装)。
                 //
-                // 开关写死为 false:将来真要加全局键时,把它改成 true,
-                // 并把键加进 `global_shortcut_keys()` 就行。
-                // (Rust 单测 `Windows线不注册任何全局快捷键` 守着这两条。)
+                // 起不来就**如实降级**(latch 不生效,并在诊断里写明),
+                // 绝不假装 latch 在工作。
+                //
+                // (Rust 单测 `Windows只抢剪贴板直入不抢默认执行` 守着开关。)
                 if HOTKEY_OBSERVER_ENABLED {
                     match nativecmd::hotkey_win::start() {
                         Ok(_) => nativecmd::hotkey_win::set_expected(true),
@@ -815,25 +824,31 @@ pub fn run() {
 
 /// Windows 线要注册的**全局快捷键**清单。
 ///
-/// ## 这里**刻意是空的**(2026-10-24 用户口径)
+/// ## 只抢 **⌃D**,不抢 ⌃S
 ///
-/// - **⌃D 是 Windows 的系统默认键**。抢过来 ⇒ 用户在自己常用的软件里按 ⌃D,
-///   那个软件/系统对话框会**直接被关掉**(用户原话:
-///   「我不能设置为快捷键,不然他直接把软件退出了」)。
-/// - **⌃S 同为系统默认键**(「保存」),而且它驱动的「默认执行(回放)」在 Windows 上
-///   **已经没有界面了**(上一轮按用户口径撤掉:「本来就没有这个功能」)。
+/// - **⌃D**:2026-10-24 用户口径「干脆直接把系统的抢了,我的软件优先级最高」。
+///   原因:在普通 Windows 软件里,Ctrl+D 常常是「**退出软件**」那一族动作
+///   (菜单加速键)。我们在模拟输入时按到它,那个软件会**直接被关掉** ——
+///   用户原话:「我不能让设置为快捷键,不然他直接把软件退出了」。
+///   ⇒ 自己把它注册成全局热键,别的软件就**收不到**它,那个软件也就退不了。
 ///
-/// Windows 线因此**一个系统全局键都不占**。
+///   能不能真抢到,取决于**谁先注册**:
+///   - 对方是**菜单加速键**(绝大多数软件的「退出」都是这种)⇒ 我们注册的
+///     `RegisterHotKey` 会**先于**它生效 ⇒ 稳赢;
+///   - 对方也用 `RegisterHotKey` 且**先注册** ⇒ 抢不到(系统不会让两个进程
+///     同时拥有同一个组合键)。
+///   ⇒ 所以「**抢没抢到必须告诉你**」:抢不到时界面要显示出来,
+///   不能让你以为「按了没反应」是系统的问题(见 `get_native_status` 的
+///   `shortcutPasteRegistered` 与界面上的提示)。
 ///
-/// 保留这个函数(而不是删掉)是为了:
-/// ① 诊断里 `shortcuts.registered` 明确是空数组,配合 `globalShortcutsEnabled: false`
-///    能一眼看出是「按政策不注册」而不是「注册失败」;
-/// ② 将来真要加全局键时,注册逻辑还在原处。
+/// - **⌃S 不抢**:它驱动的是「默认执行(回放)」,而那一屏在 Windows 上
+///   **已经没有界面了**(ADR-0026)⇒ 抢了也没有东西可触发;
+///   而 Ctrl+S 在别的软件里是「**保存**」,抢过来会把人家的保存弄坏。
 ///
-/// 这条清单由 `mod shortcut_tests` 里的单测守着:清单里一旦又出现任何
-/// `SHORTCUT_*`,单测立刻转红。
+/// 这条清单由 `mod shortcut_tests` 里的单测守着:清单里一旦出现
+/// `SHORTCUT_DEFAULT_EXECUTE`,单测立刻转红。
 pub fn global_shortcut_keys() -> Vec<&'static str> {
-    Vec::new()
+    vec![SHORTCUT_PASTE]
 }
 
 /// 要不要启动「Control 按下/松开」的观察线程。
@@ -841,15 +856,14 @@ pub fn global_shortcut_keys() -> Vec<&'static str> {
 /// 这个线程**只为全局快捷键的 latch 服务**(latch 靠它解得开:
 /// 触发一次之后必须松开 Control 才重新武装)。
 ///
-/// Windows 线**不注册任何全局快捷键**(2026-10-24 用户口径)⇒ 没有 latch
-/// ⇒ 这个每 20ms 轮询一次 `GetAsyncKeyState(VK_CONTROL)` 的线程**不该跑**
-/// (白占 CPU;用户同期反馈「Windows 上有点偏卡顿」)。
+/// ⌃D 是全局键 ⇒ latch 要用 ⇒ **要启动**。
+/// (观察源是 `GetAsyncKeyState(VK_CONTROL)`,每 20ms 轮询一次。)
 ///
 /// 写成一个常量(而不是干脆删掉那段代码)是为了:
 /// ① 意图一眼可见,不用去翻调用点;
-/// ② Rust 单测 `Windows线不注册任何全局快捷键` 能直接守着它;
-/// ③ 将来要加全局键时,改成 true 就行。
-pub const HOTKEY_OBSERVER_ENABLED: bool = false;
+/// ② Rust 单测 `Windows只抢剪贴板直入不抢默认执行` 能直接守着它;
+/// ③ 将来要改(比如换观察源)时,改一个地方就行。
+pub const HOTKEY_OBSERVER_ENABLED: bool = true;
 
 /// 注册全局快捷键(系统的全局热键 —— 只有非 macOS 平台用)。
 ///
@@ -863,7 +877,8 @@ fn register_global_shortcuts(app: &tauri::AppHandle) {
     // 先把**本进程**里可能残留的注册清掉(老版本注册过 ⌃S / ⌃D)。
     let _ = gs.unregister_all();
 
-    // **刻意为空**:Windows 线不占任何系统全局键(理由见 `global_shortcut_keys`)。
+    // 抢 **⌃D**(清单见 `global_shortcut_keys`)。
+    // 抢没抢到会记进 `ok_list` ⇒ 诊断与界面都能看到。
     let keys = global_shortcut_keys();
 
     let mut ok_list: Vec<String> = Vec::new();
@@ -944,26 +959,29 @@ mod shortcut_tests {
         }
     }
 
-    /// Windows 线**一个全局键都不占**(2026-10-24 用户口径)。
+    /// Windows 线**只抢 ⌃D,不抢 ⌃S**(2026-10-24 用户口径)。
     ///
-    /// ⌃D / ⌃S 都是 Windows 的**系统默认键**:抢过来之后,用户在自己常用的
-    /// 软件里按 ⌃D,那个软件/系统对话框会**直接被关掉**
-    /// (用户原话:「我不能设置为快捷键,不然他直接把软件退出了」)。
-    /// ⌃S 同理,而且它驱动的「默认执行(回放)」在 Windows 上已经没有界面了。
+    /// - **⌃D 要抢**:在普通 Windows 软件里,Ctrl+D 常常是「退出软件」那一族动作。
+    ///   我们抢到手 ⇒ 别的软件收不到它 ⇒ 模拟输入时按到它,那个软件不会被关掉。
+    /// - **⌃S 不抢**:它驱动的「默认执行(回放)」在 Windows 上已经没有界面了;
+    ///   而且 Ctrl+S 在别的软件里是「保存」,抢过来会把人家的保存弄坏。
     ///
-    /// 这条断言的作用:防止以后有人"顺手"把某个键加回注册清单。
+    /// 这条断言的作用:防止以后有人"顺手"把 ⌃S 也加回来。
     #[test]
-    fn Windows线不注册任何全局快捷键() {
+    fn Windows只抢剪贴板直入不抢默认执行() {
         let keys = global_shortcut_keys();
         assert!(
-            keys.is_empty(),
-            "Windows 线不该注册任何全局快捷键,实际清单: {:?}",
-            keys
+            keys.contains(&SHORTCUT_PASTE),
+            "⌃D(读剪贴板并键入)必须注册:它抢到手,别的软件才收不到 Ctrl+D"
         );
-        // 没有全局键 ⇒ 没有 latch ⇒ 那个 20ms 的 Control 轮询也不该跑。
         assert!(
-            !HOTKEY_OBSERVER_ENABLED,
-            "没有全局快捷键就不该启动 Control 观察线程(它只服务于全局键的 latch)"
+            !keys.contains(&SHORTCUT_DEFAULT_EXECUTE),
+            "⌃S(默认执行)不注册:Windows 上那一屏已经没有界面了,而 Ctrl+S 在别的软件里是「保存」"
+        );
+        // ⌃D 是全局键 ⇒ latch 要用 ⇒ 观察线程必须开着。
+        assert!(
+            HOTKEY_OBSERVER_ENABLED,
+            "⌃D 是全局键,latch 靠 Control 的按下/松开解得开 ⇒ 观察线程必须启动"
         );
     }
 }
