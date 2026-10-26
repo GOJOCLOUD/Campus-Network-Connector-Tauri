@@ -260,7 +260,7 @@ impl ManagedBrowser {
             command.creation_flags(CREATE_NEW_PROCESS_GROUP);
         }
 
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|e| format!("启动 {} 失败: {}", label, e))?;
 

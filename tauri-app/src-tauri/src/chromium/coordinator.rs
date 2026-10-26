@@ -82,6 +82,8 @@ struct Watched {
 
 #[derive(Default)]
 struct CoordState {
+    /// 开关（运行态）。
+    enabled: bool,
     watched: HashMap<u32, Watched>,
     /// 带混淆字体的标签 → 登记时的 URL（走快轮询）。
     cipher_tabs: HashMap<u32, String>,
