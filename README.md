@@ -42,7 +42,7 @@ macOS 版在这之上还多两样:**切换输入法**、**录制操作序列**,
 Windows 线按 **[ADR-0012](docs/06-决策/ADR-0012-平台功能范围-macOS全量-Windows精简.md)**
 定稿:桌面应用里保留**拼音自动键入**(Unicode 逐字键入,跨输入法可用)与
 **默认执行(回放)**;**不做**录制 / keepalive / 设为当前输入源。
-浏览器字体纠正走 Chrome/Edge 扩展(`npm run build:core` → `dist-core/chromium/`),
+浏览器字体纠正由**桌面程序自己起一个 Edge** + CDP 注入页面守卫提供(2026-10-26 起,不再用扩展 —— ADR-0030),
 **独立于桌面应用**。录制文件的挑选 / 重命名 / 删除保留在「默认执行」这一步的
 「管理」入口里。
 
@@ -95,7 +95,7 @@ npm run tauri:build:win      # → tauri-app/src-tauri/target/release/bundle/nsi
 | 路径 | 内容 | 进安装包 |
 | --- | --- | --- |
 | `packages/` | **算法核心** `core/` + **浏览器适配** `browser-adapters/`(TypeScript) | ❌(只有 `vendor/` 里的产物进包) |
-| `apps/` | Chromium / Safari 扩展(辅助形态) | ❌ |
+| pps/ | Safari 扩展(辅助形态;Chromium 扩展已在 Windows 线退役) | ❌ |
 | `tests/` | 跨浏览器端到端测试与测试页夹具 | ❌ |
 | `tools/` | 构建脚本 + `lab/` 实验 + `verify/` 校验 | ❌ |
 | `docs/` | **文档系统** | ❌ |
@@ -106,7 +106,7 @@ npm run tauri:build:win      # → tauri-app/src-tauri/target/release/bundle/nsi
 | --- | --- |
 | `dist/` | 前端产物(vite)—— **Tauri 会把它编译进二进制** |
 | `vendor/` | `npm run build:vendor` 生成;参考库缺失会自动重建(约 5 秒) |
-| `dist-core/` | 算法侧产物(Chromium 扩展等) |
+| dist-core/ | 算法侧产物(Safari 扩展等) |
 | `tauri-app/src-tauri/target/` | Rust 编译缓存与打包产物 |
 
 ## 功能模块怎么加
@@ -133,7 +133,7 @@ src/features/<功能名>/index.js
 | keepalive | 每 3 分钟 HTTPS ping,保活授权 | ✅ | ❌ 按 ADR-0012 不做 |
 | 激活授权 | 机器指纹 + 授权码 + 试用 | ✅ | ✅ |
 | Safari 复制修复 | 字体混淆还原 + 复制劫持拦截 | ✅ | ❌ 走 Apple Events,只有 macOS |
-| 浏览器字体纠正 | Chrome / Edge 扩展(与桌面应用独立) | ✅(扩展) | ✅(扩展) |
+| 浏览器字体纠正 | 桌面程序**自己起浏览器** + CDP 注入守卫 | ✅(桌面程序接管) | ✅(桌面程序接管) |
 
 ## 文档
 

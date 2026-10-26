@@ -9,7 +9,6 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "build:extension": "node tools/build.mjs chromium",
     "pretest": "npm run build",
     "test": "node tools/verify/verify-ui-platforms.cjs",
     "verify:package": "node tools/verify/verify-package-win.cjs",

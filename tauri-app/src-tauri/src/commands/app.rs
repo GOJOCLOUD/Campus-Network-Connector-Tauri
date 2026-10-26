@@ -573,17 +573,16 @@ pub fn read_file(app: AppHandle, filename: String) -> Result<Option<serde_json::
 /// 功能清单：与 Electron 版 `src/features/index.js` 的 FEATURES 保持一致。
 ///
 /// - macOS：`safari-repair`（走 Apple Events 驱动 Safari）
-/// - Windows：`chromium-repair`（把扩展注册进 Chrome / Edge）
+/// - Windows：`chromium-repair`（软件自己起 Edge + CDP 注入守卫，ADR-0030）
 ///
 /// 两条线的**开关长得一模一样**（同一个前端组件、同一个位置），
 /// 差别只在背后接的是哪个浏览器 —— ADR-0013。
 ///
-/// ⚠️ 2026-10-25 更正：以前 Windows 上这里是**空的**，理由是
-/// 「桌面程序接管不了浏览器 ⇒ 给开关就是骗人」，于是界面上给的是一段说明书
-/// （让用户自己去 chrome://extensions「加载已解压的扩展程序」）。
-/// 用户原话：「Windows上我要和Mac一样的工作方式…你别搞什么这种搞扩展这么复杂的操作」。
-/// ⇒ 现在 Windows 上**桌面程序能管**了：它把扩展注册进浏览器的外部扩展清单
-/// （HKCU，不需要开发者模式）⇒ 开关是真的能用的。
+/// ⚠️ 2026-10-26 更正：Windows 这条线**不再装扩展**了。
+/// 上一版是「把扩展注册进浏览器的外部扩展清单（HKCU）」，真机上走不通
+/// （装上被验证器禁用 + 要用户重启浏览器）⇒ 改成
+/// 「软件自己起一个 Edge，用 CDP 注入页面守卫」（见 ADR-0030）。
+/// 界面上**一个字都没变**，仍是和 mac 一样的一个开关。
 #[tauri::command]
 pub fn get_features() -> Vec<serde_json::Value> {
     if cfg!(target_os = "macos") {
@@ -608,42 +607,13 @@ pub fn get_features() -> Vec<serde_json::Value> {
 /// Windows「浏览器复制修复」的状态。
 ///
 /// 字段与 Electron 版 `chromiumRepair:getStatus` 对齐：
-/// - `enabled`：开关（落盘的那份）
-/// - `injected`：**已经注册进浏览器了没有**（注册表里有那两把键）
-/// - `registered`：注册进了哪几个浏览器
-/// - `browsersRunning`：浏览器现在开着没有 —— 开着就得重启才生效
-/// - `hint`：一句话提示（"重启浏览器后生效"这种）
+/// - `enabled`：开关
+/// - `injected`：**确实有守卫在场**（界面上的「已接管」靠它）
+/// - `browserRunning`：本软件自己起的那个浏览器在不在跑
+/// - `hint`：一句话提示（**必须说确实会发生的事**：用户要在那个窗口里用）
 /// - `lastError`：失败原因
 fn chromium_repair_status(app: &AppHandle) -> serde_json::Value {
-    let enabled = feature_enabled(app, "chromium-repair");
-    let id = crate::chromium::repair::extension_id().unwrap_or_default();
-    let registered = if id.is_empty() {
-        Vec::new()
-    } else {
-        crate::chromium::repair::registered_browsers(&id)
-    };
-    let running = crate::chromium::repair::browsers_running();
-    let hint = if enabled && !registered.is_empty() {
-        if running.is_empty() {
-            format!("已注册到 {}，下次打开浏览器即生效。", registered.join("、"))
-        } else {
-            format!(
-                "已注册到 {}，但浏览器正在运行 —— 请重启一次浏览器后生效。",
-                registered.join("、")
-            )
-        }
-    } else {
-        String::new()
-    };
-    serde_json::json!({
-        "enabled": enabled,
-        "supported": cfg!(target_os = "windows"),
-        "injected": !registered.is_empty(),
-        "registered": registered,
-        "browsersRunning": running,
-        "hint": hint,
-        "lastError": crate::chromium::repair::last_error(),
-    })
+    crate::chromium::repair::status(app)
 }
 
 /// 功能状态 —— 字段与 Electron 版 `features:getStatus` 对齐。
@@ -690,41 +660,15 @@ pub fn set_feature_enabled(
     Ok(true)
 }
 
-/// Windows「浏览器复制修复」的开关：**真的去注册 / 注销**扩展。
+/// Windows「浏览器复制修复」的开关：**真的去接管浏览器**。
+///
+/// 开启 = 本软件**自己拉起一个 Edge**（带自己的 profile）+ 用 CDP 给每个标签页
+/// 注入页面守卫；关闭 = 停止接管（那个 Edge 窗口留在那儿，它是用户的窗口了）。
 ///
 /// 失败要**如实报出去**（并记进 `lastError`）——
 /// 界面会把 lastError 显示出来，否则用户只看到"已开启"却什么都没发生。
 fn set_chromium_repair_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    let id = crate::chromium::repair::extension_id()
-        .ok_or_else(|| "扩展 manifest 缺少 key 字段，扩展 ID 算不出来".to_string())?;
-    let version = crate::chromium::repair::extension_version()
-        .unwrap_or_else(|| "0.1.0".to_string());
-    let dir = crate::chromium::repair::extension_dir(app);
-    if enabled && dir.is_none() {
-        let message = "安装包里找不到浏览器修复扩展（browser-extension 目录）".to_string();
-        crate::chromium::repair::set_last_error(Some(message.clone()));
-        return Err(message);
-    }
-    match crate::chromium::repair::set_browsers(
-        enabled,
-        dir.as_deref(),
-        &id,
-        &version,
-    ) {
-        Ok(()) => {
-            crate::chromium::repair::set_last_error(None);
-            Ok(())
-        }
-        Err(error) => {
-            crate::chromium::repair::set_last_error(Some(error.clone()));
-            Err(error)
-        }
-    }
-}
-
-/// 启动时把注册表那两把键**重写一遍**（自愈：程序挪了位置也能修回来）。
-pub fn reapply_chromium_repair(app: &AppHandle) -> Result<(), String> {
-    set_chromium_repair_enabled(app, true)
+    crate::chromium::repair::set_enabled(app, enabled)
 }
 
 /// 改**落盘状态**(下次启动仍生效)—— 与 Electron 版 `setFeatureEnabledSetting` 同语义。

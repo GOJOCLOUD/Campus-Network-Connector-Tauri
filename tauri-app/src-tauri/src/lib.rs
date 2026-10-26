@@ -725,18 +725,13 @@ pub fn run() {
             // Windows:装**托盘图标** —— 窗口被隐藏之后靠它叫回来 / 彻底退出。
             #[cfg(target_os = "windows")]
             setup_tray(app.handle());
-            // Windows:「浏览器复制修复」开关是**落盘**的 ⇒ 启动时要把注册表那两把键
-            // **重新写一遍**。
+            // Windows:「浏览器复制修复」—— 软件**自己起一个 Edge** + CDP 注入守卫。
             //
-            // 为什么每次启动都要写：注册表里的 `path` 指向安装目录里的扩展 ——
-            // 用户把程序挪了位置（或换了机器重新装），那把键就指着旧路径 ⇒
-            // 浏览器启动时找不到扩展 ⇒ 开关显示"已开启"但什么都没发生。
-            // 每次启动重写一次 = 自愈，不用用户做任何事。
+            // 协调器在这里起：两条轮询通道（主 300ms / 快 200ms）跑起来；
+            // 开关是**落盘**的 ⇒ 启动时把上次的状态恢复回来（Electron 版同口径）。
             #[cfg(target_os = "windows")]
             {
-                if appcmd::feature_enabled(app.handle(), "chromium-repair") {
-                    let _ = appcmd::reapply_chromium_repair(app.handle());
-                }
+                chromium::repair::spawn_poller(app.handle().clone());
             }
             // 录制用的「排除矩形」必须**跟着窗口走**。
             //

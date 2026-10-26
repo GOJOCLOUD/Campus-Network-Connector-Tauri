@@ -340,7 +340,7 @@ pub fn safari_running_state() -> Option<bool> {
 ///
 /// 拆出来是为了让**测试**能直接按路径加载同一份库
 /// （运行时的加载还要走 AppHandle 找包内资源，测试里没有 App）。
-fn open_db_gz(path: &std::path::Path) -> Result<GlyphDb, String> {
+pub fn open_db_gz(path: &std::path::Path) -> Result<GlyphDb, String> {
     use std::io::Read;
     let raw = std::fs::read(path).map_err(|e| format!("读文件失败: {}", e))?;
     let mut d = flate2::read::GzDecoder::new(&raw[..]);
@@ -404,7 +404,7 @@ fn reference_db(app: &tauri::AppHandle) -> Result<std::sync::Arc<GlyphDb>, Strin
 ///
 /// 快通道每 200ms 跑一轮,每次都重建就是纯浪费(还会让整台机器发烫)。
 /// Electron 版是 `engine.matchers` 这个 Map,本来就只建一次 —— 这边同口径。
-fn fast_matcher(app: &tauri::AppHandle) -> Result<std::sync::Arc<FastGlyphMatcher>, String> {
+pub fn fast_matcher(app: &tauri::AppHandle) -> Result<std::sync::Arc<FastGlyphMatcher>, String> {
     static M: OnceLock<std::sync::Arc<FastGlyphMatcher>> = OnceLock::new();
     if let Some(m) = M.get() {
         return Ok(m.clone());
@@ -425,7 +425,7 @@ fn fast_matcher(app: &tauri::AppHandle) -> Result<std::sync::Arc<FastGlyphMatche
 /// 下载失败会记进**负缓存**：站点里常驻着一些取不到的 @font-face
 /// （例如跨源的 icomoon.ttf，HTTP 404）。不缓存的话每轮调度都去请求一次，
 /// 变成无谓的外部请求 + 日志噪声。
-fn fetch_font(kind: &str, value: &str) -> Result<Vec<u8>, String> {
+pub fn fetch_font(kind: &str, value: &str) -> Result<Vec<u8>, String> {
     match kind {
         "data" => {
             let b64 = match value.find("base64,") {
@@ -529,7 +529,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 /// 之前这里找的是 `url/src/source/href/data` 那一堆键 —— 守卫从来没上报过它们，
 /// 于是 `group_font_source` 恒为 `None` → **整条链路产不出任何映射**
 /// （页面守卫装上了，但复制出来还是原始密文）。
-fn group_font_source(group: &serde_json::Value) -> Option<(String, String)> {
+pub fn group_font_source(group: &serde_json::Value) -> Option<(String, String)> {
     let font = group.get("font")?;
     if let Some(s) = font.as_str() {
         // 兜底:老格式直接给字符串
@@ -551,7 +551,7 @@ fn group_font_source(group: &serde_json::Value) -> Option<(String, String)> {
 
 /// 单字的判定结果（与 Electron 版 `engine.js` 里 `entries` 的每一项同形状）。
 #[derive(Clone, Copy, Debug)]
-struct CharInfo {
+pub struct CharInfo {
     /// 屏幕上真正显示的字（None = 没把握 / 不用改）
     plain: Option<u32>,
     /// 最近邻相似度
@@ -609,7 +609,7 @@ fn font_codepoints(face: &Face<'_>) -> Vec<char> {
 /// （实测:选区只含第 1 题时只解出 7 个字,换成 5 题后第 2~5 题全是密文）。
 ///
 /// 结果按**字体内容的哈希**缓存:同一个字体只算一次(Electron 版同口径)。
-fn analyze_font(
+pub fn analyze_font(
     db: &GlyphDb,
     matcher: &FastGlyphMatcher,
     font_bytes: &[u8],
@@ -726,7 +726,7 @@ fn analyze_font(
 /// 逐字闸门用 `replace_min_score`（0.8）——**不是**更严的预热分(0.88):
 /// 预热与选区必须用同一个阈值,否则"换题后立刻复制"时页面上只有预热那张表,
 /// 那几个字查不到 → 复制出来一半是密文(这正是"换题就失败"的成因)。
-fn build_mapping(entries: &HashMap<char, CharInfo>) -> HashMap<char, char> {
+pub fn build_mapping(entries: &HashMap<char, CharInfo>) -> HashMap<char, char> {
     let t = Thresholds::default();
     let mut out = HashMap::new();
     for (ch, info) in entries {

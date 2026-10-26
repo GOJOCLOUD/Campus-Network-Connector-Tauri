@@ -51,8 +51,7 @@
       "icons/icon.icns"
     ],
     "resources": {
-      "resources/glyph-db-48.crdb.gz": "resources/glyph-db-48.crdb.gz",
-      "../../dist-core/chromium": "browser-extension"
+      "resources/glyph-db-48.crdb.gz": "resources/glyph-db-48.crdb.gz"
     },
     "macOS": {
       "minimumSystemVersion": "11.0"

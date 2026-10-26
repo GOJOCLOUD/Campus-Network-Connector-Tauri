@@ -9,6 +9,21 @@
 
 ---
 
+## Windows 对位(Tauri 线)
+
+Windows 线**不再用扩展**了(2026-10-26 起):改成
+「**软件自己起一个 Edge + CDP 注入页面守卫**」——
+见 `docs/06-决策/ADR-0030-Windows线改用软件自起浏览器加CDP注入守卫.md`。
+
+- **页面侧那套(守卫 + 帧桥)一行都没改** ——
+  `tauri-app/src-tauri/resources/{page-guard,frame-bridge}.js` 就是同一份资产。
+- **字形引擎**同口径:Tauri 侧是 `tauri-app/src-tauri/src/glyph/*`(Rust 移植),
+  阈值与判定策略与本目录的 JS 版一致(两条线共用参考库 `glyph-db-48.crdb.gz`)。
+- 换掉的只有「**谁来执行页面 JS**」:mac 是 Apple Events,
+  Windows 是 CDP `Runtime.evaluate`(Tauri 侧实现见 `src-tauri/src/chromium/*`)。
+
+---
+
 ## 架构
 
 ```

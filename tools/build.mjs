@@ -1,12 +1,13 @@
 /**
  * 构建扩展产物。
  *
- *   node tools/build.mjs chromium
  *   node tools/build.mjs safari
  *
  * 产物：
- *   dist-core/chromium/   —— 可直接"加载已解压的扩展程序"
  *   dist-core/safari/     —— 可交给 safari-web-extension-converter 的 WebExtension 目录
+ *
+ * 注：Windows 线**不再需要 Chromium 扩展**（2026-10-26 起改成「软件自己起浏览器
+ * + CDP 注入页面守卫」，扩展已退役，见 ADR-0030），所以这里只剩 safari 一个目标。
  */
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -17,11 +18,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
 
 const TARGETS = {
-  chromium: {
-    outDir: resolve(root, 'dist-core/chromium'),
-    app: resolve(root, 'apps/chromium-extension'),
-    target: ['chrome111'],
-  },
   safari: {
     outDir: resolve(root, 'dist-core/safari'),
     app: resolve(root, 'apps/safari-extension'),
@@ -81,5 +77,5 @@ async function build(name) {
   console.log(`[build] ${name} -> ${cfg.outDir}`);
 }
 
-const target = process.argv[2] || 'chromium';
+const target = process.argv[2] || 'safari';
 await build(target);

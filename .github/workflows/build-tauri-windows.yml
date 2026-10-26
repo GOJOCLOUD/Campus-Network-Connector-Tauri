@@ -48,44 +48,36 @@ jobs:
       - name: page-guard regression test
         run: node --test tools/verify/verify-page-guard.cjs
 
-      # 硬门禁:浏览器修复扩展(复制修复)必须能构建出来(跑不过就不发包)。
+      # 硬门禁:Windows 线的浏览器复制修复**整条链路**必须真跑通(跑不过就不发包)。
       #
-      # 2026-10-25 用户反馈:「在windows上那个把密文转化成明文的那个功能是失效的,
-      # 没有用的」—— 根因不是"没写":apps/chromium-extension/(MV3、自带字形库、
-      # 独立可运行)一直都在仓库里,是**两个 Windows 安装包里都没有它**
-      # ⇒ 那条能力在 Windows 上实际等于零。
+      # 2026-10-26 起 Windows 线改成「软件自己起 Edge + CDP 注入守卫」
+      # (原先的「注册表外部扩展」路线实测走不通:装上会被验证器禁用,
+      #  而且改完还要用户重启一次浏览器 —— 违反零点击底线。见 ADR-0030)。
       #
-      # 桌面程序**接管不了浏览器**(Windows 上没有 Safari、没有 Apple Events,
-      # 没有能改写网页剪贴板事件的页面守卫通道)⇒ Windows 上的浏览器修复
-      # **就是这个扩展**:用户把它装进 Chrome/Edge,网页上复制出来才是明文。
+      # 这条门禁盯的就是那条链路的**每一环**:
+      #   起浏览器 → CDP 连上 → document_start 注入守卫 → 守卫采到混淆字体
+      #   → App 侧**真字形识别**算出映射 → 映射下发回页面
+      #   → 合成 Ctrl+C → **系统剪贴板里是明文**
       #
-      # 字形库直接用**仓库里已入库的那份**
-      # (tauri-app/src-tauri/resources/glyph-db-48.crdb.gz,与 vendor 那份
-      #  逐字节相同)—— 不用现场重建:重建要栅格化 GBK 全集,慢且没必要。
+      # 用的全是仓库里的**生产模块**(chromium::browser / chromium::bridge /
+      # chromium::coordinator / safari::repair 的字形引擎),不是另写一份玩具实现
+      # ⇒ 这条红了,装出来的包也是坏的。
       #
-      # 这条门禁盯的是**产物真的齐、真的装得进去**:manifest 是合法 MV3、
-      # 三个脚本不是空壳、字形库能解开(坏 gzip ⇒ 扩展静默失能)。
-      - name: Chromium extension build + verify
-        shell: bash
-        run: |
-          mkdir -p vendor
-          cp tauri-app/src-tauri/resources/glyph-db-48.crdb.gz vendor/glyph-db-48.crdb.gz
-          npm run build:extension
-          node --test tools/verify/verify-chromium-extension.cjs
+      # 之所以必须真跑浏览器:前面几环**静态检查抓不到** ——
+      # 2026-10-26 的实测就抓到过「commands:['copy'] 不触发 DOM copy 事件」。
+      - name: CDP copy-repair end-to-end gate
+        working-directory: tauri-app/src-tauri
+        run: cargo test --test cdp_copy_repair -- --nocapture
 
-      # 硬门禁:共享代码的两条不变量(跑不过就不发包)。
+      # 硬门禁:共享代码的一条不变量(跑不过就不发包)。
       #
-      # ① 字形渲染的**栅格尺寸**必须与参考字形库一致 ——
+      # 字形渲染的**栅格尺寸**必须与参考字形库一致 ——
       #    不一致 ⇒ 送进匹配器的位图与库里的字形**错位** ⇒ 最近邻全是噪声
       #    (实测落到「爫」「﹊」这类符号上,margin≈0)⇒ 永远判不出混淆
       #    ⇒ 复制出来还是密文,**而且全程不报错**。
       #    2026-10-25 实测踩过:渲染器 32×32、库 48×48。
-      #
-      # ② 扩展 ID 必须在 manifest / Rust / JS / 产物四处**算成同一个值** ——
-      #    算错 ⇒ 注册表写到一把**没人认的键**上 ⇒ 开关显示「已接管」,
-      #    浏览器里什么都没有(同样不报错)。
-      - name: Glyph grid + extension ID gates
-        run: node --test tools/verify/verify-glyph-grid.cjs tools/verify/verify-extension-id.cjs
+      - name: Glyph grid gate
+        run: node --test tools/verify/verify-glyph-grid.cjs
 
       # 硬门禁:界面层的回归(跑不过就不发包)。
       # - 换页时内容区**底下**那条横向滚动条不许再出现
@@ -145,15 +137,7 @@ jobs:
           path: tauri-app/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
-      # 只下了 .exe 的用户也得能拿到浏览器修复扩展 ⇒ 单独发一个附件。
-      # (桌面交付包 `模拟输入-Windows-全部.zip` 里也带了一份。)
-      - name: Pack Chromium extension for release
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist-core/chromium/*" -DestinationPath "browser-extension-chromium.zip" -Force
-          Write-Host "browser-extension-chromium.zip: $((Get-Item browser-extension-chromium.zip).Length) bytes"
-
-      - name: Publish GitHub Release（exe + 浏览器扩展附件）
+      - name: Publish GitHub Release（exe）
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -161,5 +145,5 @@ jobs:
           $exe = (Get-ChildItem "tauri-app/src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1)
           $tag = "win-tauri-${{ github.run_id }}"
           $title = "Windows Tauri build ${{ github.run_id }} (${{ github.ref_name }})"
-          gh release create $tag $exe.FullName "browser-extension-chromium.zip" --title $title --notes "Tauri 版 Windows 构建" --prerelease
+          gh release create $tag $exe.FullName --title $title --notes "Tauri 版 Windows 构建" --prerelease
           "Published: $tag"
