@@ -110,7 +110,7 @@ jobs:
       # 必须在 "Build frontend" 之后跑:tauri 的构建脚本会检查 frontendDist 在不在。
       - name: Rust unit tests
         working-directory: tauri-app/src-tauri
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
       - name: Build Tauri NSIS installer
         run: |
