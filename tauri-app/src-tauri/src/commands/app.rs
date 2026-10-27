@@ -597,7 +597,9 @@ pub fn get_features() -> Vec<serde_json::Value> {
         return vec![serde_json::json!({
             "id": "chromium-repair",
             "title": "浏览器复制修复",
-            "description": "把被网页字体混淆的文字还原成你看到的那句话",
+            // ⚠️ **要短**（2026-10-27 用户口径：「这个界面说明太详细了，
+            //    看起来乱七八糟的，不够简短」）⇒ 与 Electron 版逐字一致。
+            "description": "还原网页里被混淆的文字",
             "prefix": "chromiumRepair",
         })];
     }

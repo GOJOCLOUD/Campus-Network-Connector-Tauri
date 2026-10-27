@@ -105,17 +105,32 @@ fn remember_port(profile_dir: &Path, port: u16) {
     let _ = std::fs::write(profile_dir.join(PORT_FILE), port.to_string());
 }
 
-/// 扫进程列表，找「正在用我们这个 profile」的浏览器，取它的调试端口。
+/// 扫进程列表的结果。
+#[derive(Default)]
+struct ProfileBrowsers {
+    /// 带 `--remote-debugging-port=` 的那些（能连的候选）。
+    ports: Vec<u16>,
+    /// 用了我们这个 profile、但**没带调试端口**的浏览器进程数。
+    ///
+    /// 它的存在意味着「再起一个只会是**转发启动**」⇒ 只会给已经在跑的那个
+    /// **再开一个标签页**（用户原话：「浏览器里面的页面超级多」）。
+    without_port: u32,
+}
+
+/// 扫进程列表，找「正在用我们这个 profile」的浏览器。
 ///
 /// 最后一道兜底：前两种办法都拿不到时，至少**别再去起一个「转发启动」的**
 /// （起了等于白起，还把「找回上次那个」的路堵死）。
 /// profile 路径经**环境变量**传进去（命令行里有中文/空格时引号不可靠）。
-fn find_running_ports_blocking(profile_dir: &Path) -> Vec<u16> {
+fn find_running_ports_blocking(profile_dir: &Path) -> ProfileBrowsers {
     let script = r#"
 $p = $env:CR_PROFILE
 Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
   Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) -and $_.CommandLine -notmatch '--type=' } |
-  ForEach-Object { if ($_.CommandLine -match '--remote-debugging-port=(\d+)') { $Matches[1] } }
+  ForEach-Object {
+    if ($_.CommandLine -match '--remote-debugging-port=(\d+)') { 'PORT:' + $Matches[1] }
+    else { 'NOPORT' }
+  }
 "#;
     let mut command = Command::new("powershell.exe");
     command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
@@ -127,18 +142,26 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
         command.creation_flags(CREATE_NO_WINDOW);
     }
     let Ok(output) = command.output() else {
-        return Vec::new();
+        return ProfileBrowsers::default();
     };
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut ports: Vec<u16> = Vec::new();
+    let mut found = ProfileBrowsers::default();
     for line in text.lines() {
-        if let Ok(port) = line.trim().parse::<u16>() {
-            if port > 0 && !ports.contains(&port) {
-                ports.push(port);
+        let line = line.trim();
+        if line == "NOPORT" {
+            found.without_port += 1;
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("PORT:") else {
+            continue;
+        };
+        if let Ok(port) = rest.parse::<u16>() {
+            if port > 0 && !found.ports.contains(&port) {
+                found.ports.push(port);
             }
         }
     }
-    ports
+    found
 }
 
 /// 异步版：扫进程列表**不能**在 async 函数里同步做。
@@ -150,7 +173,7 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
 ///
 /// ⚠️ 用 `spawn_blocking` 而不是 `tokio::process`：tokio 没开 "process" 特性，
 ///    加特性要重生成 Cargo.lock（本机没 cargo 编不了）⇒ 保持依赖不动。
-async fn find_running_ports(profile_dir: PathBuf) -> Vec<u16> {
+async fn find_running_ports(profile_dir: PathBuf) -> ProfileBrowsers {
     tokio::task::spawn_blocking(move || find_running_ports_blocking(&profile_dir))
         .await
         .unwrap_or_default()
@@ -507,11 +530,12 @@ impl ManagedBrowser {
             }
         }
         // 扫进程命令行：可能扫出多个（其中一个是刚转发出去的、端口没真开）⇒ 逐个试
-        for port in find_running_ports(self.profile_dir.clone()).await {
-            if let Some(client) = attach_to_port(&self.profile_dir, port, ATTACH_TIMEOUT_MS).await {
+        let running = find_running_ports(self.profile_dir.clone()).await;
+        for port in &running.ports {
+            if let Some(client) = attach_to_port(&self.profile_dir, *port, ATTACH_TIMEOUT_MS).await {
                 let label = "浏览器".to_string();
-                remember_port(&self.profile_dir, port);
-                let (started_by_us, child) = if prev_port == port {
+                remember_port(&self.profile_dir, *port);
+                let (started_by_us, child) = if prev_port == *port {
                     (prev_started, prev_child.take())
                 } else {
                     (false, None)
@@ -519,13 +543,30 @@ impl ManagedBrowser {
                 *guard = Some(BrowserHandle {
                     client: client.clone(),
                     started_by_us,
-                    port,
+                    port: *port,
                     label,
                     child,
                 });
                 return Ok(client);
             }
         }
+        // ⚠️ **已经有浏览器在跑、只是暂时连不上 ⇒ 绝不能再起一个**（2026-10-27 真机踩过）。
+        //
+        // 同 profile 再起一个 = Chromium 的「转发启动」：新进程不开自己的调试端口，
+        // 只是给**已经在跑**的那个**再开一个标签页**，然后自己退出
+        // ⇒ 页面越积越多，而且新标签页上**没有守卫**（复制出来还是密文）。
+        //
+        // 所以这里如实报错、让下一轮重试连接，**不新起浏览器**。
+        //
+        // ⚠️ 这一段放在「用户自己关的」**之后**：「用户自己关的」是更具体、
+        //    更可操作的状态（界面会给出「重新打开浏览器」按钮）⇒ 它该优先。
+        let browser_busy = !running.ports.is_empty() || running.without_port > 0;
+        let busy_ports = running
+            .ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join("、");
 
         // ⚠️ **这个判定必须放在起浏览器之前**（而不是只在 tick 开头看一次）：
         //    tick 每 300ms 一轮，而浏览器的「进程退出」与 tick 之间有时间差
@@ -549,6 +590,14 @@ impl ManagedBrowser {
             .store(closed_by_user, std::sync::atomic::Ordering::Relaxed);
         if !auto_reopen && closed_by_user {
             return Err("浏览器被用户关掉了（不自动重开）".into());
+        }
+
+        // 已经有浏览器在跑、只是暂时连不上 ⇒ **不再起一个**（理由见上面那段注释）。
+        if browser_busy {
+            return Err(format!(
+                "浏览器已经在跑（端口 {}），但暂时连不上；请稍候重试",
+                busy_ports
+            ));
         }
 
         // 真的没有 ⇒ 这才自己起一个。
@@ -666,7 +715,16 @@ impl ManagedBrowser {
             "--no-first-run".to_string(),
             "--no-default-browser-check".to_string(),
             "--no-default-apps".to_string(),
-            "--restore-last-session".to_string(),
+            // ⚠️ **不要 `--restore-last-session`**（2026-10-27 真机踩过）。
+            //
+            // 加上它之后，每次启动都会把**上一次会话**的标签页全恢复出来，
+            // 而上一次会话里又包含着上次恢复出来的那些标签页
+            // ⇒ 标签页**越滚越多**（实测：一次启动就恢复出 21 个 `about:blank`）。
+            // 标签页一多，浏览器启动就慢，调试端口迟迟不开 ⇒ 判定成「起不来」
+            // ⇒ 下一轮又拉起一个 ⇒ 又恢复一遍
+            // ⇒ **标签页越来越多、浏览器根本没法用**。
+            //
+            // 不恢复会话**不影响登录**：cookie / 密码都存在 profile 里，照样有效。
             "about:blank".to_string(),
         ];
 
@@ -710,7 +768,7 @@ impl ManagedBrowser {
             Err(e) => {
                 // 我们起的这个进程可能只是「转发」给了一个**已经在跑**的浏览器
                 // （同 profile 的单例行为）⇒ 真正在服务的那个才是我们要连的。
-                for running in find_running_ports(self.profile_dir.clone()).await {
+                for running in find_running_ports(self.profile_dir.clone()).await.ports {
                     if running == port {
                         continue;
                     }
@@ -751,8 +809,19 @@ impl ManagedBrowser {
         let client = match CdpClient::connect(&url).await {
             Ok(client) => client,
             Err(e) => {
+                // ⚠️ **连不上也要算一次失败**（2026-10-27 真机踩过）。
+                //
+                // 调试端口开了 ≠ 连得上：标签页一多，浏览器忙，WebSocket 握手就可能超时。
+                // 早先这里直接往上抛，而 `launch_failures` 在下面才被清成 0
+                // ⇒ **失败次数永远不涨** ⇒ 「起不来上限」形同虚设
+                // ⇒ 每 4 秒重试一次，每次都再拉起一个浏览器
+                // ⇒ 用户看到的就是「反反复复拉起浏览器，页面越积越多」。
                 let _ = child.kill();
-                return Err(format!("{}（{}）", e, url));
+                let failures = self
+                    .launch_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                return Err(format!("{}（{}）；连续第 {} 次连不上", e, url, failures));
             }
         };
         // 记住端口 ⇒ 下次连不上时能找回**这个**浏览器

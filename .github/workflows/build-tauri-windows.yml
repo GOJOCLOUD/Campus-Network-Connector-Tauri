@@ -87,6 +87,20 @@ jobs:
       - name: build flavor gate
         run: node --test tools/verify/verify-build-flavor.cjs
 
+      # 右上角「最小化 / 叉叉」两个按钮**点得动** + 那一栏说明**足够短**的门禁。
+      #
+      # 2026-10-27 用户原话:「右上角的缩小,最小化按钮,以及关闭按钮,
+      # 完全就无法生效,然后打开浏览器这一栏界面说明太详细了,
+      # 看起来乱七八糟的,不够简短」。
+      #
+      # 按钮点不动的根因(与 Electron 线同源):根容器是
+      # `data-tauri-drag-region="deep"`(整窗都是拖拽区),而 Tauri 判定
+      # 「这次 mousedown 要不要拖窗口」是从被点到的元素往上找**最近一个**
+      # 带该属性的祖先 ⇒ 找到根容器 ⇒ 判定成「拖窗口」⇒ 点击根本不会触发按钮。
+      # ⇒ 右上角按钮容器与内容区都必须显式写 `data-tauri-drag-region="false"`。
+      - name: window buttons and copy gate
+        run: node --test tools/verify/verify-window-buttons.cjs
+
       # 硬门禁:共享代码的一条不变量(跑不过就不发包)。
       #
       # 字形渲染的**栅格尺寸**必须与参考字形库一致 ——

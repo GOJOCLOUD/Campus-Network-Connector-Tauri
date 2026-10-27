@@ -41,7 +41,7 @@ export default function FeatureToggles({ featureList, featureStatus, onToggle, o
         </div>
         {browserClosed ? (
           <div className="mt-1.5 text-xs text-gray-600 flex items-center gap-2">
-            <span>浏览器已关闭 —— 本软件不会自动再弹一个。</span>
+            <span>浏览器已关闭（不会自动重开）</span>
             <button type="button"
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); onReopenFeatureBrowser?.(f.prefix) }}
               className="font-medium py-0.5 px-2.5 rounded bg-blue-600 hover:bg-blue-700 text-white">

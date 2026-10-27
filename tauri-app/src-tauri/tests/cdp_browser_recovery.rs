@@ -116,7 +116,7 @@ fn source_level_no_more_relaunch_loop() {
     // ① 扫进程**不能**在 async 里同步做
     //    （早先在 ensure() 里直接 Command::output() ⇒ 把 Tokio 工作线程卡住最多 15 秒）
     assert!(
-        source.contains("async fn find_running_ports(profile_dir: PathBuf) -> Vec<u16>"),
+        source.contains("async fn find_running_ports(profile_dir: PathBuf) -> ProfileBrowsers"),
         "browser.rs 里的 find_running_ports 应该是异步的"
     );
     assert!(
@@ -181,6 +181,63 @@ fn source_level_no_more_relaunch_loop() {
     assert!(
         reread_at < decide_at && decide_at < launch_at,
         "退出码必须在判定之前、launch 之前**再读一次**（读 2 秒前的旧值 ⇒ 又会弹一个）"
+    );
+
+    // ⑦ **不许恢复上一次会话**（2026-10-27 真机踩过）
+    //    `--restore-last-session` ⇒ 每次启动都把上次那堆标签页恢复出来，
+    //    而上次那堆里又包含着上上次恢复出来的 ⇒ 标签页越滚越多
+    //    （实测：一次启动就恢复出 21 个 `about:blank`）
+    //    ⇒ 浏览器越起越慢 ⇒ 判定成「起不来」⇒ 又拉起一个
+    //    ⇒ 用户原话：「不断的拉起浏览器，浏览器里面的页面超级多，
+    //    而且这个浏览器根本就是无法使用的状态」。
+    //    ⚠️ 只查**启动参数那一段**（注释里提到这个标志是解释，不算）。
+    let Some(args_at) = source.find("let args: Vec<String> = vec![") else {
+        panic!("browser.rs 里找不到启动参数数组");
+    };
+    let args_block = &source[args_at..args_at + 1200];
+    let args_code: String = args_block
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !args_code.contains("--restore-last-session"),
+        "启动参数里还有 --restore-last-session ⇒ 标签页会越滚越多，浏览器最后没法用"
+    );
+
+    // ⑧ **连不上也要算一次失败**
+    //    调试端口开了 ≠ WebSocket 连得上（标签页一多，浏览器忙，握手会超时）。
+    //    早先这里直接抛，而 launch_failures 在下面才被清成 0 ⇒ 失败次数永远不涨
+    //    ⇒ 「起不来上限」形同虚设 ⇒ 每 4 秒重试一次，每次都再拉起一个浏览器。
+    let Some(connect_at) = source.find("CdpClient::connect(&url)") else {
+        panic!("browser.rs 里找不到 CdpClient::connect(&url)");
+    };
+    let after_connect = &source[connect_at..connect_at + 900];
+    assert!(
+        after_connect.contains("fetch_add(1"),
+        "CdpClient::connect 失败没有计入 launch_failures ⇒ 「起不来上限」不生效 ⇒ 会无限拉起浏览器"
+    );
+
+    // ⑨ **已经有浏览器在跑 ⇒ 绝不能再起一个**
+    //    同 profile 再起一个 = Chromium 的「转发启动」：新进程不开自己的调试端口，
+    //    只是给已经在跑的那个**再开一个标签页** ⇒ 页面越积越多。
+    assert!(
+        source.contains("浏览器已经在跑"),
+        "browser.rs 没有「浏览器已经在跑就不许再起」的判定 ⇒ 会不停开新标签页"
+    );
+    let ensure_block2 = source
+        .split("pub async fn ensure(")
+        .nth(1)
+        .expect("browser.rs 里找不到 ensure()");
+    let busy_at = ensure_block2
+        .find("浏览器已经在跑")
+        .expect("ensure() 里找不到「浏览器已经在跑」的判定");
+    let launch_at2 = ensure_block2
+        .find("self.launch(")
+        .expect("ensure() 里找不到 launch 调用");
+    assert!(
+        busy_at < launch_at2,
+        "「浏览器已经在跑就不许再起」的判定必须在 launch() **之前**"
     );
 }
 

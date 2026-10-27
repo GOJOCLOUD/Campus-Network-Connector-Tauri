@@ -75,11 +75,22 @@ export default function Stepper({
         style={{ border: '1px solid #ddd', backgroundColor: '#fff' }}
       >
         {corner ? (
-          <div className="app-nodrag absolute top-3 right-3 z-20">{corner}</div>
+          // ⚠️ **必须写 `data-tauri-drag-region="false"`**（2026-10-27 真机踩过）。
+          //
+          // 根容器是 `data-tauri-drag-region="deep"` ⇒ 整窗都是拖拽区。
+          // Tauri 判定「这次 mousedown 要不要拖窗口」时，从**被点到的元素**
+          // 往上找**最近一个**带 `data-tauri-drag-region` 的祖先：
+          // 找到的是根容器（"deep"）⇒ 判定成「拖窗口」⇒ **点击根本不会触发按钮**。
+          // 只有在这一层显式写 "false"，`closest()` 才会先命中它。
+          // （Electron 版靠 CSS `app-nodrag` + 「步骤行不是拖拽区」解决，
+          //   两边效果必须一样 ⇒ 这里补上 Tauri 版的等价标记。）
+          <div className="app-nodrag absolute top-3 right-3 z-20" data-tauri-drag-region="false">{corner}</div>
         ) : null}
+        {/* ⚠️ 这一行**不能**是拖拽区：它的矩形横跨整张卡片，右上角正好压在
+            窗口按钮上面 ⇒ 那一块会被当成「拖窗口」，按钮点不动。
+            根容器的拖拽区已经覆盖整窗，这一行不需要再单独声明。 */}
         <div
-          className={`${stepContainerClassName} app-drag flex w-full items-center p-8`}
-          data-tauri-drag-region="deep"
+          className={`${stepContainerClassName} flex w-full items-center p-8`}
         >
           {stepsArray.map((_, index) => {
             const stepNumber = index + 1;
@@ -116,6 +127,9 @@ export default function Stepper({
           isCompleted={isCompleted}
           currentStep={currentStep}
           direction={direction}
+          // ⚠️ **必须写 `data-tauri-drag-region="false"`**：根容器是 "deep"，
+          //    内容区里的「开启 / 关闭」「输入框」都在拖拽区里
+          //    ⇒ 不显式关掉的话，点了没反应。
           className={`app-nodrag space-y-2 px-8 text-gray-900 ${contentClassName}`}
         >
           {stepsArray[currentStep - 1]}
