@@ -169,14 +169,14 @@ fn source_level_no_more_relaunch_loop() {
         .split("pub async fn ensure(")
         .nth(1)
         .expect("browser.rs 里找不到 ensure()");
-    let decide_at = ensure_block
-        .find("auto_reopen")
-        .expect("ensure() 里找不到 auto_reopen 的判定");
     let reread_at = ensure_block
         .find("prev_child.as_mut()")
         .expect("ensure() 里没有用 prev_child 再读一次退出码");
+    let decide_at = ensure_block
+        .find("if !auto_reopen && closed_by_user")
+        .expect("ensure() 里找不到「要不要弹」的判定");
     let launch_at = ensure_block
-        .find(".launch(")
+        .find("self.launch(")
         .expect("ensure() 里找不到 launch 调用");
     assert!(
         reread_at < decide_at && decide_at < launch_at,
