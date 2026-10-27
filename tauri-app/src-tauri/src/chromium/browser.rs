@@ -551,7 +551,11 @@ impl ManagedBrowser {
     ///
     /// 退出码 0 = 用户关掉了窗口（不是崩溃）。区分得出来，
     /// 才能「用户关的不再弹给他看，崩了的才自动恢复」。
-    pub async fn closed_by_user(&self) -> bool {
+    ///
+    /// ⚠️ 这里**不是 async**：它只是读一个原子标志，没有要等的东西。
+    ///    （之前写成 `async` 而调用处忘了 `.await` ⇒ Rust 编译不过，
+    ///      2026-10-27 CI `error[E0308]: expected bool, found future`。）
+    pub fn closed_by_user(&self) -> bool {
         self.closed_by_user.load(std::sync::atomic::Ordering::Relaxed)
     }
 
