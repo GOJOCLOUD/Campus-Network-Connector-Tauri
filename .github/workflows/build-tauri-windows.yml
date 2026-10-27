@@ -69,6 +69,21 @@ jobs:
         working-directory: tauri-app/src-tauri
         run: cargo test --test cdp_copy_repair -- --nocapture
 
+      # 硬门禁:浏览器连不上时**绝不能**疯狂重开 Edge(跑不过就不发包)。
+      #
+      # 盯的是 2026-10-27 真机踩出来的 bug:
+      # 恢复流程只认 Chromium 自己写的 DevToolsActivePort 文件,
+      # 而**同 profile 的第二个浏览器是「转发启动」**(Chromium 单例)——
+      # 它退出时会把那个文件**删掉** ⇒ 永远找不回上次那个浏览器
+      # ⇒ 每 29 秒重开一个 Edge(还多开一个空白标签页),
+      # 而且**再也没连回那个 Edge** ⇒ 新标签页没守卫、复制出来还是密文。
+      #
+      # 这条门禁要求:三条候选(自己记的端口 → DevToolsActivePort → 扫进程命令行)
+      # 全部试过之前**不许起新的**;并且真跑一遍,验证断线后连回的是**同一个**浏览器。
+      - name: CDP browser recovery gate
+        working-directory: tauri-app/src-tauri
+        run: cargo test --test cdp_browser_recovery -- --nocapture
+
       # 硬门禁:共享代码的一条不变量(跑不过就不发包)。
       #
       # 字形渲染的**栅格尺寸**必须与参考字形库一致 ——

@@ -71,6 +71,67 @@ fn find_free_port() -> Result<u16, String> {
     Ok(port)
 }
 
+/// 我们自己记的端口文件名 —— 比 Chromium 自己写的 DevToolsActivePort 可靠。
+///
+/// 为什么必须自己记：**同 profile 的第二个浏览器是「转发启动」**（Chromium 单例），
+/// 它不开自己的调试端口，退出时还会把 Chromium 写的 DevToolsActivePort **删掉**
+/// ⇒ 正好在我们最需要找回「上次那个还在跑的浏览器」的时候，那个文件没了。
+/// （2026-10-27 真机踩过：每 29 秒重开一个 Edge，而且**再也没连回去**
+/// ⇒ 新标签页没守卫、网页复制出来还是密文。）
+const PORT_FILE: &str = "simuinput-cdp-port.txt";
+
+/// 读回我们自己记的端口。
+fn read_remembered_port(profile_dir: &Path) -> Option<u16> {
+    let raw = std::fs::read_to_string(profile_dir.join(PORT_FILE)).ok()?;
+    let port: u32 = raw.trim().parse().ok()?;
+    if port == 0 || port > u16::MAX as u32 {
+        return None;
+    }
+    Some(port as u16)
+}
+
+/// 记住我们起的那个浏览器的端口。
+fn remember_port(profile_dir: &Path, port: u16) {
+    let _ = std::fs::create_dir_all(profile_dir);
+    let _ = std::fs::write(profile_dir.join(PORT_FILE), port.to_string());
+}
+
+/// 扫进程列表，找「正在用我们这个 profile」的浏览器，取它的调试端口。
+///
+/// 最后一道兜底：前两种办法都拿不到时，至少**别再去起一个「转发启动」的**
+/// （起了等于白起，还把「找回上次那个」的路堵死）。
+/// profile 路径经**环境变量**传进去（命令行里有中文/空格时引号不可靠）。
+fn find_running_ports(profile_dir: &Path) -> Vec<u16> {
+    let script = r#"
+$p = $env:CR_PROFILE
+Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
+  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($p) -and $_.CommandLine -notmatch '--type=' } |
+  ForEach-Object { if ($_.CommandLine -match '--remote-debugging-port=(\d+)') { $Matches[1] } }
+"#;
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    command.env("CR_PROFILE", profile_dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut ports: Vec<u16> = Vec::new();
+    for line in text.lines() {
+        if let Ok(port) = line.trim().parse::<u16>() {
+            if port > 0 && !ports.contains(&port) {
+                ports.push(port);
+            }
+        }
+    }
+    ports
+}
+
 /// 把 `%VAR%` 展开成真实路径。
 ///
 /// ⚠️ 拼剩下的那段**必须先把开头的分隔符去掉**再 join：
@@ -101,17 +162,6 @@ fn find_browser() -> Option<(String, PathBuf)> {
         }
     }
     None
-}
-
-/// 从 profile 目录里读出上次那个浏览器的调试端口（Chromium 自己写的）。
-fn read_port_from_profile(profile_dir: &Path) -> Option<u16> {
-    let raw = std::fs::read_to_string(profile_dir.join("DevToolsActivePort")).ok()?;
-    let first = raw.lines().next()?.trim();
-    let port: u32 = first.parse().ok()?;
-    if port == 0 {
-        return None;
-    }
-    Some(port as u16)
 }
 
 /// 从 profile 目录里读出调试端口与 WebSocket 路径。
@@ -349,22 +399,84 @@ impl ManagedBrowser {
             }
         }
 
-        // 1) 先试上次那个还在跑的（程序重启、浏览器没关）。
-        if let Some(client) = try_attach(&self.profile_dir).await {
-            let label = "浏览器".to_string();
-            let port = read_port_from_profile(&self.profile_dir).unwrap_or(0);
-            *guard = Some(BrowserHandle {
-                client: client.clone(),
-                started_by_us: false,
-                port,
-                label,
-                child: None,
-            });
-            return Ok(client);
+        // 旧的那一份：连接断了，但浏览器进程可能还在，
+        // 而且**可能还是我们起的**（那台是我们打开给用户用的）。
+        // ⇒ 重新连上**同一个**浏览器时，要把这个归属接回去，
+        //    否则退出时我们就不去关它了（它是我们开的嘛）。
+        let mut previous = guard.take();
+        let (prev_port, prev_started, mut prev_child) = match previous.as_mut() {
+            Some(old) => {
+                let port = old.port;
+                let started = old.started_by_us;
+                let child = old.child.take();
+                (port, started, child)
+            }
+            None => (0, false, None),
+        };
+
+        // 找「已经开着的那台」—— 顺序按可靠程度:
+        //   ① 我们自己记的端口（我们起的那个，最可靠）
+        //   ② Chromium 写的 DevToolsActivePort（别人起的那个）
+        //   ③ 扫进程命令行（前两个都拿不到时的兜底）
+        //
+        // ⚠️ 在这三条都试过之前**绝不能**去起新的:
+        // 同 profile 的第二个浏览器是「转发启动」（Chromium 单例）—— 它不开自己的
+        // 调试端口，退出时还会把 DevToolsActivePort 删掉
+        // ⇒ 起了等于白起，还把「找回上次那个」这条路堵死。
+        // （2026-10-27 真机踩过：每 29 秒重开一个 Edge，用户窗口一个一个弹出来，
+        //  而且**再也没连回那个 Edge** ⇒ 新标签页没守卫、复制出来还是密文。）
+        let mut candidates: Vec<u16> = Vec::new();
+        if let Some(port) = read_remembered_port(&self.profile_dir) {
+            candidates.push(port);
+        }
+        if let Some((port, _)) = read_endpoint_from_profile(&self.profile_dir) {
+            if !candidates.contains(&port) {
+                candidates.push(port);
+            }
+        }
+        for port in candidates {
+            if let Some(client) = attach_to_port(&self.profile_dir, port).await {
+                let label = "浏览器".to_string();
+                remember_port(&self.profile_dir, port);
+                let (started_by_us, child) = if prev_port == port {
+                    (prev_started, prev_child.take())
+                } else {
+                    (false, None)
+                };
+                *guard = Some(BrowserHandle {
+                    client: client.clone(),
+                    started_by_us,
+                    port,
+                    label,
+                    child,
+                });
+                return Ok(client);
+            }
+        }
+        // 扫进程命令行：可能扫出多个（其中一个是刚转发出去的、端口没真开）⇒ 逐个试
+        for port in find_running_ports(&self.profile_dir) {
+            if let Some(client) = attach_to_port(&self.profile_dir, port).await {
+                let label = "浏览器".to_string();
+                remember_port(&self.profile_dir, port);
+                let (started_by_us, child) = if prev_port == port {
+                    (prev_started, prev_child.take())
+                } else {
+                    (false, None)
+                };
+                *guard = Some(BrowserHandle {
+                    client: client.clone(),
+                    started_by_us,
+                    port,
+                    label,
+                    child,
+                });
+                return Ok(client);
+            }
         }
 
-        // 2) 没有就自己起一个。
-        self.launch(&mut guard).await
+        // 真的没有 ⇒ 这才自己起一个。
+        self.launch(&mut guard, prev_port, prev_started, prev_child)
+            .await
     }
 
     /// 浏览器还在吗（连接没断）。
@@ -374,6 +486,15 @@ impl ManagedBrowser {
             Some(handle) => !handle.client.is_closed(),
             None => false,
         }
+    }
+
+    /// 现在连着的那个浏览器的调试端口（连不上时是 0）。
+    ///
+    /// 恢复门禁要拿它比对「连回来的是不是**同一个**浏览器」——
+    /// 端口变了 ⇒ 又起了一个（那就又中了「疯狂重开」那个坑）。
+    pub async fn port(&self) -> u16 {
+        let guard = self.inner.lock().await;
+        guard.as_ref().map(|h| h.port).unwrap_or(0)
     }
 
     /// 浏览器叫什么（Edge / Chrome）。
@@ -386,7 +507,13 @@ impl ManagedBrowser {
     }
 
     /// 启动浏览器并连上。
-    async fn launch(&self, guard: &mut Option<BrowserHandle>) -> Result<Arc<CdpClient>, String> {
+    async fn launch(
+        &self,
+        guard: &mut Option<BrowserHandle>,
+        prev_port: u16,
+        prev_started: bool,
+        mut prev_child: Option<Child>,
+    ) -> Result<Arc<CdpClient>, String> {
         let Some((label, executable)) = find_browser() else {
             return Err("找不到 Edge 或 Chrome（本机没装，或装在了没覆盖到的位置）".into());
         };
@@ -446,6 +573,30 @@ impl ManagedBrowser {
         let url = match wait_for_endpoint(&self.profile_dir, port, LAUNCH_TIMEOUT_MS).await {
             Ok(url) => url,
             Err(e) => {
+                // 我们起的这个进程可能只是「转发」给了一个**已经在跑**的浏览器
+                // （同 profile 的单例行为）⇒ 真正在服务的那个才是我们要连的。
+                for running in find_running_ports(&self.profile_dir) {
+                    if running == port {
+                        continue;
+                    }
+                    if let Some(client) = attach_to_port(&self.profile_dir, running).await {
+                        let label = "浏览器".to_string();
+                        remember_port(&self.profile_dir, running);
+                        let (started_by_us, child) = if prev_port == running {
+                            (prev_started, prev_child.take())
+                        } else {
+                            (false, None)
+                        };
+                        *guard = Some(BrowserHandle {
+                            client: client.clone(),
+                            started_by_us,
+                            port: running,
+                            label,
+                            child,
+                        });
+                        return Ok(client);
+                    }
+                }
                 let process = describe_process(&mut child);
                 let _ = child.kill();
                 return Err(format!(
@@ -464,6 +615,9 @@ impl ManagedBrowser {
                 return Err(format!("{}（{}）", e, url));
             }
         };
+        // 记住端口 ⇒ 下次连不上时能找回**这个**浏览器
+        // （Chromium 自己写的 DevToolsActivePort 会被「转发启动」的进程删掉）。
+        remember_port(&self.profile_dir, port);
 
         *guard = Some(BrowserHandle {
             client: client.clone(),
@@ -503,14 +657,13 @@ impl ManagedBrowser {
     }
 }
 
-/// 试着连上「已经开着的那台」；连不上返回 `None`。
+/// 按**指定端口**连上；连不上返回 `None`。
 ///
-/// 端口从 profile 目录里的 `DevToolsActivePort` 读（Chromium 自己写的，
-/// 不会过期：浏览器重启会把它重写），再问它自己的 `/json/version`
-/// 拿 WebSocket 地址。
-async fn try_attach(profile_dir: &Path) -> Option<Arc<CdpClient>> {
-    let (port, _) = read_endpoint_from_profile(profile_dir)?;
-    let url = wait_for_endpoint(profile_dir, port, 1500).await.ok()?;
+/// 为什么要「按端口连」而不是只认 `DevToolsActivePort` 那个文件：
+/// 同 profile 的第二个浏览器（转发启动）退出时会把那个文件**删掉**
+/// ⇒ 那一路会整个失效。我们自己记的端口 + 扫进程命令行才是兜底。
+async fn attach_to_port(profile_dir: &Path, port: u16) -> Option<Arc<CdpClient>> {
+    let url = wait_for_endpoint(profile_dir, port, 5000).await.ok()?;
     match CdpClient::connect(&url).await {
         Ok(client) => Some(client),
         Err(_) => None,
