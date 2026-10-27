@@ -53,10 +53,15 @@ test('右上角按钮容器**必须**写 data-tauri-drag-region="false"', () => 
 });
 
 test('内容区**必须**写 data-tauri-drag-region="false"（否则里面的开关点不动）', () => {
-  const content = /<StepContentWrapper([\s\S]*?)\/>/.exec(STEPPER);
-  assert.ok(content, 'Stepper.jsx 里找不到 StepContentWrapper');
-  assert.ok(/data-tauri-drag-region="false"/.test(content[1]),
-    '内容区必须写 data-tauri-drag-region="false"，否则「开启 / 关闭」「输入框」点了没反应');
+  // ⚠️ **必须看 StepContentWrapper 内部那个 motion.div**。
+  //    这个组件**不透传**多余 props ⇒ 属性写在 `<StepContentWrapper ...>` 上
+  //    是**没用**的（2026-10-27 真机踩过：装包后读 DOM，内容区那层没有这个属性
+  //    ⇒ 开关依然点不动）。
+  const wrapper = /function StepContentWrapper\([\s\S]*?\r?\n\}\r?\n/.exec(STEPPER);
+  assert.ok(wrapper, 'Stepper.jsx 里找不到 StepContentWrapper 的定义');
+  assert.ok(/data-tauri-drag-region="false"/.test(wrapper[0]),
+    'StepContentWrapper 内部的 motion.div 上必须有 data-tauri-drag-region="false"，' +
+    '否则内容区里的「开启 / 关闭」「输入框」在 Tauri 里点了没反应');
 });
 
 test('「步骤圈那一行」**不能**是拖拽区（它的矩形盖住右上角按钮）', () => {

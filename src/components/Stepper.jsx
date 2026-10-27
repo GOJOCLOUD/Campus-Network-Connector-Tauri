@@ -127,10 +127,9 @@ export default function Stepper({
           isCompleted={isCompleted}
           currentStep={currentStep}
           direction={direction}
-          // ⚠️ **必须写 `data-tauri-drag-region="false"`**：根容器是 "deep"，
-          //    内容区里的「开启 / 关闭」「输入框」都在拖拽区里
-          //    ⇒ 不显式关掉的话，点了没反应。
           className={`app-nodrag space-y-2 px-8 text-gray-900 ${contentClassName}`}
+          // ⚠️ `data-tauri-drag-region="false"` **写在 StepContentWrapper 内部的
+          //    motion.div 上**（那个组件不透传多余 props，写在这儿是**没用**的）。
         >
           {stepsArray[currentStep - 1]}
         </StepContentWrapper>
@@ -184,6 +183,18 @@ function StepContentWrapper({
 
   return (
     <motion.div
+      // ⚠️ **这里必须自己写 `data-tauri-drag-region="false"`**（2026-10-27 真机踩过）。
+      //
+      // 根容器是 `data-tauri-drag-region="deep"`（整窗都是拖拽区），
+      // 内容区里的「开启 / 关闭」「输入框」都在里面
+      // ⇒ 不显式关掉的话，点了没反应（Tauri 从被点到的元素往上找
+      //    **最近一个**带该属性的祖先，找到的是根容器 ⇒ 判定成「拖窗口」）。
+      //
+      // ⚠️ **不能只在 `<StepContentWrapper ...>` 上写这个属性** ——
+      //    这个组件**不透传**多余 props ⇒ 属性根本到不了 DOM
+      //    （2026-10-27 真机抓到：装包后用 WebView2 的调试端口读 DOM，
+      //      内容区那层**没有**这个属性 ⇒ 开关依然点不动）。
+      data-tauri-drag-region="false"
       // **横向不许滚**(`overflow-x: hidden`)。
       //
       // 为什么必须写死:overflowY 是 auto 时,按 CSS 规范另一个轴的 visible
