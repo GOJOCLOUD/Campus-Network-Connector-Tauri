@@ -90,3 +90,29 @@ test('Electron 版还改了安装名/开始菜单名（跟 mac 线同名会分�
   assert.ok(/Electron/.test(pkg.build.nsis.shortcutName),
     `build.nsis.shortcutName 应该带 Electron（现在「${pkg.build.nsis.shortcutName}」）`);
 });
+
+test('窗口标题不会被前端 <title> 顶掉（2026-10-27 真机实测踩过）', () => {
+  const flavor = /export const BUILD_FLAVOR\s*=\s*'([^']+)'/.exec(
+    fs.readFileSync(FLAVOR_FILE, 'utf8'),
+  )[1];
+
+  // 前端页面标题也得写上版本名：
+  //   Tauri v2 在 Windows 上就是拿页面 <title> 去改窗口标题的，
+  //   Electron 默认也会跟着页面标题变（`page-title-updated`）。
+  //   只改配置不改这个 ⇒ 真机上窗口标题又变回「模拟输入」，
+  //   两个版本在任务栏/Alt+Tab 里长得一模一样 ⇒ 又分不出来了。
+  //   （真机实测：明明 tauri.conf.json 里 title 是「模拟输入（Tauri 版）」，
+  //     窗口标题却是「模拟输入」。）
+  const html = readIfExists(path.join(ROOT, 'index.html'));
+  assert.ok(html.includes(`<title>模拟输入（${flavor}）</title>`),
+    `index.html 的 <title> 应该是「模拟输入（${flavor}）」`
+    + '（Windows 上窗口标题会被页面标题顶掉，写错就分不出是哪个版本）');
+
+  // Electron 还要显式拦住「页面改标题」这条默认行为（Tauri 靠上面那条即可）。
+  if (!isTauri) {
+    const main = readIfExists(path.join(ROOT, 'main.js'));
+    assert.ok(/page-title-updated/.test(main) &&
+      /page-title-updated[\s\S]{0,300}preventDefault/.test(main),
+      'main.js 没有拦住 page-title-updated ⇒ 窗口标题会被页面 <title> 顶掉');
+  }
+});
