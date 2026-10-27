@@ -140,5 +140,22 @@ if (fs.existsSync(indexHtml)) {
     missing.length ? '缺: ' + missing.join(', ') : `${refs.length} 个引用`);
 }
 
+// ⑤ 窗口标题真的进到二进制里了吗?
+//
+//    「配置里写了」不等于「编进去了」:
+//    Tauri 有**平台覆盖配置**(tauri.windows.conf.json),它会**整个替换**
+//    app.windows 数组 ⇒ 真机上 Windows 用的是它,不是 tauri.conf.json。
+//    2026-10-27 真机抓到:主配置写着「模拟输入（Tauri 版）」,
+//    窗口标题却是「模拟输入」⇒ 就是那个文件盖掉的。
+//
+//    这里直接查**编出来的 exe** 里有没有带版本名的标题字符串。
+const FLAVOR_TITLE = '模拟输入（Tauri 版）';
+if (exe) {
+  const bytes = fs.readFileSync(exe);
+  const hasTitle = bytes.includes(Buffer.from(FLAVOR_TITLE, 'utf8'));
+  check('二进制里带着版本化的窗口标题', hasTitle,
+    hasTitle ? `找到「${FLAVOR_TITLE}」` : `exe 里找不到「${FLAVOR_TITLE}」`);
+}
+
 console.log(failed === 0 ? '\n✔ Tauri Windows 产物自检全部通过' : `\n✖ ${failed} 项不通过`);
 process.exit(failed === 0 ? 0 : 1);

@@ -87,6 +87,38 @@ test('托盘提示与窗口标题写的是同一个版本', () => {
     `窗口标题里没有「模拟输入（${flavor}）」`);
 });
 
+test('Windows 用的**平台覆盖配置**也写了版本名（2026-10-27 真机抓到）', () => {
+  if (!isTauri) {
+    // Electron 线没有平台覆盖配置（窗口标题在 main.js 里写）
+    return;
+  }
+  const flavor = /export const BUILD_FLAVOR\s*=\s*'([^']+)'/.exec(
+    fs.readFileSync(FLAVOR_FILE, 'utf8'),
+  )[1];
+
+  // ⚠️ **Tauri 有平台覆盖配置**：`tauri.windows.conf.json` 会**整个替换**
+  //    `app.windows` 这个数组 ⇒ **真机上 Windows 用的不是 `tauri.conf.json`**。
+  //
+  //    2026-10-27 真机抓到：主配置里明明写着「模拟输入（Tauri 版）」，
+  //    装上去窗口标题却还是「模拟输入」 —— 就是这个文件把它盖掉了。
+  //    （而且数组是**整个替换**，连 `hiddenTitle`/`titleBarStyle` 一起被换掉。）
+  const dir = path.join(ROOT, 'tauri-app', 'src-tauri');
+  const confs = fs.readdirSync(dir).filter((f) => /^tauri.*\.conf\.json$/.test(f));
+  assert.ok(confs.length >= 2,
+    `只找到 ${confs.length} 份 tauri 配置（${confs.join(', ')}）`
+    + ' —— 得确认 Windows 真正用的是哪一份，别让平台覆盖文件悄悄盖掉标题');
+
+  for (const f of confs) {
+    const conf = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    const wins = (conf.app && conf.app.windows) || [];
+    for (const w of wins) {
+      if (!w.title) continue;
+      assert.strictEqual(w.title, `模拟输入（${flavor}）`,
+        `${f} 里的窗口标题是「${w.title}」，应该是「模拟输入（${flavor}）」`);
+    }
+  }
+});
+
 test('Electron 版还改了安装名/开始菜单名（跟 mac 线同名会分不清）', () => {
   if (isTauri) {
     // Tauri 的 productName 本来就带 -Tauri，不用额外要求
