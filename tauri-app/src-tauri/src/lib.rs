@@ -65,6 +65,8 @@ fn diag_report(app: tauri::AppHandle, info: serde_json::Value) {
                     "globalShortcutsEnabled": global_shortcuts_enabled,
                     // ⌃D **抢到了没有** —— 界面的提示行也靠它。
                     "pasteRegistered": crate::shortcut_paste_registered(),
+                    // Windows 专用:低级键盘钩子装上了没有(⌃D 的优先级靠它,见 ADR-0033)。
+                    "hookCtrlD": crate::hotkey_hook_installed(),
                     "defaultExecute": SHORTCUT_DEFAULT_EXECUTE,
                     "paste": SHORTCUT_PASTE,
                     "tap": tap_state,
@@ -272,7 +274,31 @@ fn registered_shortcuts() -> Vec<String> {
 /// 我们的 ⌃D **不会触发**,而目标软件自己的 Ctrl+D 也**照常生效**
 /// (所以那个软件还是会被它自己的「收藏夹 / 退出」之类动作干掉)⇒ 必须让用户知道。
 pub fn shortcut_paste_registered() -> bool {
-    registered_shortcuts().iter().any(|k| k == SHORTCUT_PASTE)
+    if registered_shortcuts().iter().any(|k| k == SHORTCUT_PASTE) {
+        return true;
+    }
+    // Windows:低级键盘钩子装上了 ⇒ ⌃D 也算**抢到了**
+    // (哪怕系统热键那一层没抢到 —— 钩子那一层更靠前,见 ADR-0033)。
+    #[cfg(target_os = "windows")]
+    {
+        nativecmd::hotkey_hook_win::installed()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// 低级键盘钩子装上了没有(Windows 专用;其它平台恒为 false)。
+pub fn hotkey_hook_installed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        nativecmd::hotkey_hook_win::installed()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 #[tauri::command]
@@ -283,6 +309,9 @@ fn window_quit(app: tauri::AppHandle) {
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         let _ = app.global_shortcut().unregister_all();
     }
+    // Windows:把**低级键盘钩子**也摘掉(不然它会一直挂着这个组合键)。
+    #[cfg(target_os = "windows")]
+    nativecmd::hotkey_hook_win::stop();
     app.exit(0);
 }
 
@@ -794,6 +823,32 @@ pub fn run() {
                     }
                 } else {
                     nativecmd::hotkey_win::set_expected(false);
+                }
+                // ⌃D 的**优先级**:装**低级键盘钩子**(`WH_KEYBOARD_LL`)。
+                //
+                // 2026-10-27 真人反馈:在**微信**里按 ⌃D 是微信自己的动作,
+                // 我们的「读剪贴板并键入」不触发;别的软件里一切正常。
+                // 当场查过:微信**没有**用系统热键(我们的 `RegisterHotKey(Ctrl+D)`
+                // 是注册成功的)⇒ 微信用的是**低级键盘钩子**。而 Windows 的输入顺序是
+                //
+                //     **低级钩子 → 系统热键 → 目标窗口**
+                //
+                // ⇒ 微信在系统热键**之前**就把键处理掉了 ⇒ 我们的 `WM_HOTKEY` 根本没来过。
+                //
+                // 办法:我们也装一个,看到 ⌃D 就**吞掉它** ⇒ 微信收不到、系统热键也收不到
+                // ⇒ 只有我们响应(也不会重复触发)。
+                // ⚠️ Windows 的规则是「**后安装的钩子先被调用**」⇒ 本软件后启动就赢;
+                //    对方后启动就对方赢 —— 这是机制问题,用户这边绕不过去。
+                //
+                // 装不上时**如实降级**:还有系统热键那一路,但压不过用钩子的软件。
+                match nativecmd::hotkey_hook_win::start(app.handle().clone()) {
+                    Ok(true) => eprintln!(
+                        "[shortcut] 低级键盘钩子已装上 ⇒ ⌃D 的优先级压过用钩子的软件(微信那类)"
+                    ),
+                    Ok(false) => eprintln!(
+                        "[shortcut] 低级键盘钩子没装上 ⇒ ⌃D 只剩「系统热键」那一级(微信那类仍会抢走它)"
+                    ),
+                    Err(e) => eprintln!("[shortcut] 低级键盘钩子启动失败: {}", e),
                 }
             }
             #[cfg(not(target_os = "macos"))]

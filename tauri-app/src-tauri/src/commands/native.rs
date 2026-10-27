@@ -45,6 +45,11 @@ pub mod hotkey_core;
 #[cfg(target_os = "windows")]
 pub mod hotkey_win;
 
+/// Windows 侧的**低级键盘钩子** —— ⌃D 的「优先级」靠它
+/// (微信那类**用钩子抢键**的软件压不过系统热键,见 ADR-0033)。
+#[cfg(target_os = "windows")]
+pub mod hotkey_hook_win;
+
 #[cfg(target_os = "macos")]
 use macos as imp;
 #[cfg(target_os = "windows")]
