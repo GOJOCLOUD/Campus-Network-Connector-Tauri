@@ -84,7 +84,7 @@ impl Hotkey {
     pub fn label(&self) -> &'static str {
         match self {
             Hotkey::Execute => "⌃S",
-            Hotkey::Paste => "⌃⇧D",
+            Hotkey::Paste => "⌃D",
         }
     }
 }
@@ -107,18 +107,17 @@ pub fn match_hotkey(key: PrimaryKey, mods: u8) -> Option<Hotkey> {
     }
     match key {
         PrimaryKey::S => Some(Hotkey::Execute),
-        // **⌃⇧D**(2026-10-25 用户口径:「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」)
-        // ⇒ Control 之外**还要 Shift**。
+        // **⌃D**(2026-10-27 用户口径:「把快捷键都搞成 Ctrl+D」)。
         //
-        // 「此刻必须按住 Shift」太挑人(三个手指按下三个键的时间点不可能完全重合),
-        // 容错由 [`StickyModifiers`] 兜:Shift 在窗口内**按下过**也算数。
-        PrimaryKey::D => {
-            if mods & MOD_SHIFT == 0 {
-                None
-            } else {
-                Some(Hotkey::Paste)
-            }
-        }
+        // 只认「**有没有** Control」—— 手上多带一个 Shift / ⌥ / Fn **照样触发**。
+        // (这是 mac 线一直以来的口径;2026-10-23 用户原话:「只要按住 Ctrl
+        //  再点一下字母」。)
+        //
+        // 为什么不能要求「恰好只有 Control」:系统全局热键是**精确匹配**,
+        // 多带一个修饰键就对不上 ⇒ 按键没被吃掉 ⇒ 那个 D 漏进前台应用
+        // (10-23 用户抱怨过的「多打出一个 D」),同时动作也不执行
+        // (看起来就是「快捷键失灵」)。容错由 [`StickyModifiers`] 兜。
+        PrimaryKey::D => Some(Hotkey::Paste),
         PrimaryKey::Other => None,
     }
 }
@@ -201,7 +200,7 @@ impl StickyModifiers {
 /// > 「触发之后 Ctrl+D 整个按键就不再会继续影响它了,
 /// > 除非下一次重新按住 Ctrl,再点击相应的字母」
 ///
-/// (2026-10-25 起剪贴板直入的键改成了 **⌃⇧D**,规则本身不变。)
+/// (2026-10-27 起剪贴板直入的键是 **⌃D**,规则本身不变。)
 ///
 /// 也就是说:**触发一次就被"消费掉"** —— 之后 Control 还按着、字母再按
 /// 也不触发;**必须松开 Control 再重新按住**,才重新武装。
@@ -363,7 +362,7 @@ mod tests {
 
     // ── 判定 ───────────────────────────────────────────────────────
 
-    /// ⌃S 只要 Control;**⌃⇧D 要 Control + Shift**(2026-10-25 改口径)。
+    /// ⌃S 只要 Control;**⌃D 也只要 Control**(2026-10-27 改口径:统一成 ⌃D)。
     #[test]
     fn 认得出两个快捷键() {
         assert_eq!(match_hotkey(PrimaryKey::S, CTRL), Some(Hotkey::Execute));
@@ -373,13 +372,12 @@ mod tests {
         );
     }
 
-    /// **⌃D(光 Control)不再触发** —— 剪贴板直入改成 **⌃⇧D**。
+    /// **⌃D(光 Control)就触发** —— 2026-10-27 用户口径:「把快捷键都搞成 Ctrl+D」。
     ///
-    /// 用户原话(2026-10-25):「你不要用 ctrl+D 了,直接 ctrl+shift+D 吧」。
-    /// 光按 ⌃D 时那个 D 必须**漏给前台应用**(它是普通输入,不是快捷键)。
+    /// 多带一个 Shift **照样触发**(容错);光有 Shift 没有 Control 不算。
     #[test]
-    fn 光Control的D不再触发() {
-        assert_eq!(match_hotkey(PrimaryKey::D, CTRL), None);
+    fn 光Control的D就触发() {
+        assert_eq!(match_hotkey(PrimaryKey::D, CTRL), Some(Hotkey::Paste));
     }
 
     /// ⌃S **多带一个 Shift 也照样触发**(容错),但**光有 Shift 不算**。
@@ -418,7 +416,7 @@ mod tests {
         assert_eq!(
             match_hotkey(PrimaryKey::D, mods),
             Some(Hotkey::Paste),
-            "窗口内的 ⌃⇧D 应该触发"
+            "窗口内的 ⌃D 应该触发"
         );
     }
 
@@ -604,7 +602,7 @@ mod tests {
             find_pending_hotkey(&pressed, to_primary, CTRL, now, WINDOW),
             Some((b'S', Hotkey::Execute))
         );
-        // D 同理(⌃⇧D:Control 之外还要 Shift)
+        // D 同理(⌃D:只要 Control)
         let pressed_d = vec![(b'D', now)];
         assert_eq!(
             find_pending_hotkey(&pressed_d, to_primary, SHIFT | CTRL, now, WINDOW),

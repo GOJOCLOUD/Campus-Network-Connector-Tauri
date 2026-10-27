@@ -2,7 +2,7 @@
 //! `triggerDefaultExecute` / `triggerPinyinFromClipboard` **同口径**。
 //!
 //! - ⌃S:触发「默认执行」—— 回放选中的录制文件(没选中就回放名字最大的那个)
-//! - ⌃⇧D:读剪贴板(或输入框里固定的那段文本)并逐字键入
+//! - ⌃D:读剪贴板(或输入框里固定的那段文本)并逐字键入
 //!
 //! 走的是**后端**这条路,不是界面上那条:快捷键在界面没打开时也要能用。
 
@@ -121,7 +121,7 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// ⌃⇧D:读剪贴板(或输入框里固定的那段文本)并逐字键入。
+/// ⌃D:读剪贴板(或输入框里固定的那段文本)并逐字键入。
 ///
 /// ## 两个平台是**同构**的
 ///
@@ -139,7 +139,7 @@ pub fn trigger_default_execute(app: &AppHandle) -> Result<(), String> {
 /// ## 与 ADR-0012「Windows 保留拼音自动键入」不冲突
 ///
 /// ADR-0012 说的是「键盘输入」那一页:用户**手动敲**内容,Windows 用 Unicode 逐字键入。
-/// ⌃⇧D 是另一件事:把**剪贴板里已有的文本**直接敲进去,不用手动敲。
+/// ⌃D 是另一件事:把**剪贴板里已有的文本**直接敲进去,不用手动敲。
 /// 一个是「从键盘输入」,一个是「从剪贴板输入」——两条不同的路,不是同一件事做了两遍。
 pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
     let settings = crate::commands::app::get_settings(app.clone()).unwrap_or(serde_json::json!({}));
@@ -159,7 +159,7 @@ pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
     };
     let text = text.trim().to_string();
     if text.is_empty() {
-        record_shortcut_hit("⌃⇧D", "剪贴板是空的");
+        record_shortcut_hit("⌃D", "剪贴板是空的");
         return Ok(());
     }
 
@@ -184,11 +184,11 @@ pub fn trigger_pinyin_from_clipboard(app: &AppHandle) -> Result<(), String> {
 
     match crate::commands::native::send_text(text.clone()) {
         Ok(_) => {
-            record_shortcut_hit("⌃⇧D", &format!("已键入 {} 个字符", text.chars().count()));
+            record_shortcut_hit("⌃D", &format!("已键入 {} 个字符", text.chars().count()));
             Ok(())
         }
         Err(e) => {
-            record_shortcut_hit("⌃⇧D", &format!("键入失败: {}", e));
+            record_shortcut_hit("⌃D", &format!("键入失败: {}", e));
             Err(e)
         }
     }

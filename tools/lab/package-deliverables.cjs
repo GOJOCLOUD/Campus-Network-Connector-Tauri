@@ -173,7 +173,7 @@ function zipMac(apps, target) {
         '2) 把想要的那个 .app 拖进「应用程序」文件夹',
         '3) 双击启动(首次打开若提示「无法验证开发者」,右键点它 → 「打开」→ 再点「打开」)',
         '',
-        '4) 给「辅助功能」授权(**默认执行 ⌃S / 回放 / 剪贴板直输 ⌃⇧D 都靠它**):',
+        '4) 给「辅助功能」授权(**默认执行 ⌃S / 回放 / 剪贴板直输 ⌃D 都靠它**):',
         '   系统设置 → 隐私与安全性 → 辅助功能 → 找到刚放进去的那个 App,打开开关',
         '   · 两个版本是**两个独立程序**,要**各授权一次**;',
         '   · App 启动时也会弹系统授权框,点「好」即可;',
@@ -443,7 +443,7 @@ function main() {
     const missing = must.filter((f) => !list.includes(f));
     if (missing.length) {
       console.error('\n✖ Windows 包缺东西 ⇒ 这次交付**不算完成**:');
-      for (const f of missing) console.error(    - );
+      for (const f of missing) console.error(`    - ${f}`);
       process.exit(1);
     }
     console.log('\n✔ Windows 包含安装说明(浏览器修复由软件自己起浏览器接管)');

@@ -514,13 +514,16 @@ async function probeLayout(page) {
       await page.close();
     }
 
-    // ── Windows 线**只抢 ⌃⇧D**,不抢 ⌃S(源码级断言)──
+    // ── Windows 线**抢 ⌃D(主键)+ ⌃⇧D(容错别名)**,不抢 ⌃S(源码级断言)──
     //
-    // 2026-10-25 用户口径:「干脆直接把系统的抢了,我的软件优先级最高……
+    // 2026-10-24 用户口径:「干脆直接把系统的抢了,我的软件优先级最高……
     // Ctrl 加 D 我发现在普通桌面它是退出软件的功能,那在使用这个的时候
-    // 没必要退出吧,所以就给他压制住」+「你不要用ctrl+D了,直接ctrl+shift+D吧」。
+    // 没必要退出吧,所以就给他压制住」。
+    // 2026-10-27 用户口径:「**把快捷键都搞成 Ctrl+D**」⇒ 主键换回 ⌃D。
     //
-    // - **⌃⇧D** = 读剪贴板并键入 —— 我们抢的就是它(抢到手,别的软件就收不到);
+    // - **⌃D** = 读剪贴板并键入 —— 主键(抢到手,别的软件就收不到);
+    // - **⌃⇧D** = 容错别名 —— 系统全局热键是**精确匹配**,手上多带一个
+    //   Shift 时 ⌃D 不触发 ⇒ 别名把那条路兜住(它不新增占用);
     // - **⌃S** = 默认执行(回放)—— Windows 上那一屏**已经没有界面了**
     //   (ADR-0016),而 Ctrl+S 在别的软件里是「保存」⇒ **不抢**。
     //
@@ -530,30 +533,33 @@ async function probeLayout(page) {
         path.join(__dirname, '..', '..', 'tauri-app', 'src-tauri', 'src', 'lib.rs'),
         'utf8',
       );
-      // 注册清单由 `global_shortcut_keys()` 决定 —— 它必须**只含 ⌃⇧D**。
+      // 注册清单由 `global_shortcut_keys()` 决定 —— 它必须**含 ⌃D 与 ⌃⇧D 别名**。
       const keysFn = libRs.match(/pub fn global_shortcut_keys\(\)[^{]*\{([^{}]*)\}/);
       const keysBody = keysFn ? keysFn[1] : '';
-      check('Tauri 的全局快捷键清单里**有** ⌃⇧D(要抢的就是它)',
+      check('Tauri 的全局快捷键清单里**有** ⌃D(主键,用户 2026-10-27 口径)',
         /SHORTCUT_PASTE/.test(keysBody),
+        keysBody.trim() || '没找到 global_shortcut_keys()');
+      check('Tauri 的全局快捷键清单里**有** ⌃⇧D(容错别名:多带一个 Shift 时也触发)',
+        /SHORTCUT_PASTE_ALT/.test(keysBody),
         keysBody.trim() || '没找到 global_shortcut_keys()');
       check('Tauri 的全局快捷键清单里**没有** ⌃S(默认执行:Windows 那屏已撤,且 Ctrl+S 是「保存」)',
         !/SHORTCUT_DEFAULT_EXECUTE/.test(keysBody), keysBody.trim());
-      // ⌃⇧D 的**值**必须是 `Control+Shift+D`:
-      //   - 少了 Shift ⇒ 又变成 ⌃D(用户明令改掉的键,而且 ⌃D 在别的软件里
-      //     是「退出」那一族);
-      //   - 修饰键必须写在键**之前**(global-hotkey 0.8.0 的解析器要求,
-      //     `Ctrl+Shift+D` 能解析,`Ctrl+D+Shift` 直接报错)。
+      // 主键 ⌃D 的**值**必须是 `Control+D`(修饰键必须写在键**之前** ——
+      // global-hotkey 0.8.0 的解析器要求,`Ctrl+D` 能解析,`D+Ctrl` 直接报错)。
       const pasteConst = libRs.match(/SHORTCUT_PASTE\s*:\s*&str\s*=\s*"([^"]+)"/);
       const pasteVal = pasteConst ? pasteConst[1] : '';
-      check('Tauri 的 ⌃⇧D 常量值是 "Control+Shift+D"',
-        pasteVal === 'Control+Shift+D', pasteVal || '没找到 SHORTCUT_PASTE 的值');
-      check('Tauri 的 ⌃⇧D **没有**退回成 "Control+D"(用户明令改键)',
-        pasteVal !== 'Control+D', pasteVal);
+      check('Tauri 的 ⌃D 常量值是 "Control+D"',
+        pasteVal === 'Control+D', pasteVal || '没找到 SHORTCUT_PASTE 的值');
+      // 容错别名 ⌃⇧D 的值必须是 `Control+Shift+D`。
+      const altConst = libRs.match(/SHORTCUT_PASTE_ALT\s*:\s*&str\s*=\s*"([^"]+)"/);
+      const altVal = altConst ? altConst[1] : '';
+      check('Tauri 的 ⌃⇧D 容错别名常量值是 "Control+Shift+D"',
+        altVal === 'Control+Shift+D', altVal || '没找到 SHORTCUT_PASTE_ALT 的值');
       // Control 按下/松开的轮询观察器**只为全局键的 latch 服务** ——
-      // 抢了 ⌃⇧D 就必须开着(不然按住 Ctrl 连按会连着触发,剪贴板被键入好几遍)。
+      // 抢了 ⌃D 就必须开着(不然按住 Ctrl 连按会连着触发,剪贴板被键入好几遍)。
       // (查的是**开关常量**,不是"调用点消失":调用点还在,被这个开关挡着。)
       const observerOn = /HOTKEY_OBSERVER_ENABLED:\s*bool\s*=\s*true/.test(libRs);
-      check('Control 轮询观察器是开的(⌃⇧D 的 latch 需要它)',
+      check('Control 轮询观察器是开的(⌃D 的 latch 需要它)',
         observerOn,
         observerOn ? 'HOTKEY_OBSERVER_ENABLED = true' : '没找到 HOTKEY_OBSERVER_ENABLED = true');
       // 「抢没抢到」要能被界面读到 ⇒ 原生状态里必须有这一栏。
