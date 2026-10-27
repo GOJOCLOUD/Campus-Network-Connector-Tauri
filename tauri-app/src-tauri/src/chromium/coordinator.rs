@@ -285,7 +285,7 @@ impl Coordinator {
         // （2026-10-27 用户口径：「反反复复拉起浏览器」）。
         // 界面会显示「浏览器已关闭」+ 一个「重新打开」按钮。
         let auto_reopen = self.state.lock().unwrap().auto_reopen;
-        if !auto_reopen && self.browser.closed_by_user().await {
+        if !auto_reopen && self.browser.refresh_exit_state().await {
             {
                 let mut state = self.state.lock().unwrap();
                 state.browser_closed_by_user = true;

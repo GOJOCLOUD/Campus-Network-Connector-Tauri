@@ -438,7 +438,7 @@ impl ManagedBrowser {
         // 退出码 0 = 用户自己关掉了窗口；非 0 = 崩了/被杀了。
         // 区分得出来，才能「用户关的不再弹给他看，崩了的才自动恢复」。
         let mut closed_by_user = false;
-        if let Some(old) = guard.as_ref() {
+        if let Some(old) = guard.as_mut() {
             if let Some(child) = old.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
                     closed_by_user = status.code() == Some(0);
@@ -536,6 +536,33 @@ impl ManagedBrowser {
     /// 才能「用户关的不再弹给他看，崩了的才自动恢复」。
     pub async fn closed_by_user(&self) -> bool {
         self.closed_by_user.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 刷新一下「我们起的那个浏览器进程怎么退的」。
+    ///
+    /// ⚠️ **每次判断「要不要重开」之前都要先调它** ——
+    ///    退出码是在 `ensure()` 里读的，而 `ensure()` 会把 handle **拿走**
+    ///    ⇒ 不主动刷新的话，退出码要到「连接断了那一次」才读得到，
+    ///    而那时候浏览器已经被重新拉起来了 ⇒ 判断永远不成立。
+    ///
+    /// 返回 true = **用户关掉了窗口**（退出码 0）。
+    pub async fn refresh_exit_state(&self) -> bool {
+        let mut guard = self.inner.lock().await;
+        let closed = match guard.as_mut() {
+            Some(handle) if handle.started_by_us => match handle.child.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => status.code() == Some(0),
+                    _ => false,
+                },
+                None => false,
+            },
+            _ => false,
+        };
+        if closed {
+            self.closed_by_user
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        closed
     }
 
     /// 用户点了「重新打开浏览器」⇒ 把「用户关的」这个状态清掉。
