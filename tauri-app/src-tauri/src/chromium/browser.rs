@@ -443,7 +443,9 @@ impl ManagedBrowser {
         // 先看一眼我们起的那个浏览器进程：是不是**干净地**退了。
         // 退出码 0 = 用户自己关掉了窗口；非 0 = 崩了/被杀了。
         // 区分得出来，才能「用户关的不再弹给他看，崩了的才自动恢复」。
-        let mut closed_by_user = false;
+        let mut closed_by_user = self
+            .closed_by_user
+            .load(std::sync::atomic::Ordering::Relaxed);
         if let Some(old) = guard.as_mut() {
             if let Some(child) = old.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
@@ -451,7 +453,8 @@ impl ManagedBrowser {
                 }
             }
         }
-        self.closed_by_user.store(closed_by_user, std::sync::atomic::Ordering::Relaxed);
+        self.closed_by_user
+            .store(closed_by_user, std::sync::atomic::Ordering::Relaxed);
 
         let mut previous = guard.take();
         let (prev_port, prev_started, mut prev_child) = match previous.as_mut() {
@@ -528,10 +531,23 @@ impl ManagedBrowser {
         //    tick 每 300ms 一轮，而浏览器的「进程退出」与 tick 之间有时间差
         //    ⇒ 只在 tick 开头判会漏掉「刚好在那一轮之前关掉」的情况
         //    ⇒ 2026-10-27 真机复验（Electron 线）就是这样又弹了一个。
-        //
-        //    走到这里时，attach + 扫进程已经花掉约 2 秒 ⇒ 退出状态**一定**已经读到了。
         let auto_reopen = self.auto_reopen.load(std::sync::atomic::Ordering::Relaxed);
-        if !auto_reopen && self.closed_by_user() {
+        // ⚠️ 这里**再读一次**退出码（上面那次是 2 秒多以前读的）：
+        //    浏览器可能正好在那 2 秒里退出了 ⇒ 那时读到的是「还没退」
+        //    ⇒ 会把「用户关掉的」当成「崩了的」⇒ 又弹一个。
+        //    （2026-10-27 Electron 线 CI 实测到这个 race，Rust 线同样要堵：
+        //      `try_wait()` 是**同步**问操作系统的，所以这里读到的就是最新的。）
+        let mut closed_by_user = self
+            .closed_by_user
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(child) = prev_child.as_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                closed_by_user = status.code() == Some(0);
+            }
+        }
+        self.closed_by_user
+            .store(closed_by_user, std::sync::atomic::Ordering::Relaxed);
+        if !auto_reopen && closed_by_user {
             return Err("浏览器被用户关掉了（不自动重开）".into());
         }
 

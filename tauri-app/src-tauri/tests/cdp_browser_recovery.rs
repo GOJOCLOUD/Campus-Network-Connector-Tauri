@@ -160,6 +160,28 @@ fn source_level_no_more_relaunch_loop() {
         coord.contains("auto_reopen"),
         "coordinator.rs 缺少 auto_reopen（用户关掉的窗口不该自动再弹一个）"
     );
+
+    // ⑥ 起浏览器之前**必须再读一次**退出码
+    //    （2026-10-27 Electron 线 CI 实测到的 race：判断发生在退出事件之前
+    //      ⇒ 明明是用户关掉的，却还是弹了一个。Rust 线用 try_wait() 同步问，
+    //      所以必须在 launch 之前**就地**再问一次，不能用 2 秒前读到的旧值。）
+    let ensure_block = source
+        .split("pub async fn ensure(")
+        .nth(1)
+        .expect("browser.rs 里找不到 ensure()");
+    let decide_at = ensure_block
+        .find("auto_reopen")
+        .expect("ensure() 里找不到 auto_reopen 的判定");
+    let reread_at = ensure_block
+        .find("prev_child.as_mut()")
+        .expect("ensure() 里没有用 prev_child 再读一次退出码");
+    let launch_at = ensure_block
+        .find(".launch(")
+        .expect("ensure() 里找不到 launch 调用");
+    assert!(
+        reread_at < decide_at && decide_at < launch_at,
+        "退出码必须在判定之前、launch 之前**再读一次**（读 2 秒前的旧值 ⇒ 又会弹一个）"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
