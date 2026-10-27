@@ -267,8 +267,12 @@ pub fn start(app: AppHandle) -> Result<bool, String> {
                 }
             };
             // 起始状态取当前物理状态,别凭空造一个边沿。
+            //
+            // ⚠️ `GetAsyncKeyState` 返回 **i16**,而「当前按着」那个位是 0x8000
+            // —— 那个字面量塞不进 i16 ⇒ 必须**先转成 u16** 再取位
+            // (同 `hotkey_win` 里的写法)。
             CTRL_DOWN.store(
-                unsafe { GetAsyncKeyState(VK_CONTROL) } & 0x8000 != 0,
+                (unsafe { GetAsyncKeyState(VK_CONTROL) } as u16) & 0x8000 != 0,
                 Ordering::Relaxed,
             );
             let _ = ready_tx.send(Ok(true));
