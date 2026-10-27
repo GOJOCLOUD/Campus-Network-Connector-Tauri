@@ -191,10 +191,12 @@ fn source_level_no_more_relaunch_loop() {
     //    ⇒ 用户原话：「不断的拉起浏览器，浏览器里面的页面超级多，
     //    而且这个浏览器根本就是无法使用的状态」。
     //    ⚠️ 只查**启动参数那一段**（注释里提到这个标志是解释，不算）。
+    //    ⚠️ 按**字符**切，别按字节切 —— 切点很可能落在汉字中间
+    //    （2026-10-27 CI 实测：panicked at "end byte index ... is not a char boundary"）。
     let Some(args_at) = source.find("let args: Vec<String> = vec![") else {
         panic!("browser.rs 里找不到启动参数数组");
     };
-    let args_block = &source[args_at..args_at + 1200];
+    let args_block: String = source[args_at..].chars().take(1200).collect();
     let args_code: String = args_block
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
@@ -212,7 +214,7 @@ fn source_level_no_more_relaunch_loop() {
     let Some(connect_at) = source.find("CdpClient::connect(&url)") else {
         panic!("browser.rs 里找不到 CdpClient::connect(&url)");
     };
-    let after_connect = &source[connect_at..connect_at + 900];
+    let after_connect: String = source[connect_at..].chars().take(800).collect();
     assert!(
         after_connect.contains("fetch_add(1"),
         "CdpClient::connect 失败没有计入 launch_failures ⇒ 「起不来上限」不生效 ⇒ 会无限拉起浏览器"
