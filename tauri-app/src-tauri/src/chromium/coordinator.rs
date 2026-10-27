@@ -182,6 +182,8 @@ impl Coordinator {
                 state.browser_closed_by_user = false;
             }
         }
+        // 口径也要下发给浏览器那边：**判定必须发生在真正起浏览器之前**。
+        self.browser.set_auto_reopen(auto_reopen);
         if auto_reopen {
             self.browser.clear_closed_by_user();
         }
@@ -294,7 +296,21 @@ impl Coordinator {
             }
             return Ok(TickOutcome::default());
         }
-        let bridge = self.ensure_bridge().await?;
+        let bridge = match self.ensure_bridge().await {
+            Ok(bridge) => bridge,
+            // 「用户自己关掉了那个浏览器窗口」**不是故障** ⇒ 不当失败处理，
+            // 如实把状态报给界面（界面显示「重新打开浏览器」按钮）。
+            Err(e) if e.contains("被用户关掉") => {
+                {
+                    let mut state = self.state.lock().unwrap();
+                    state.browser_closed_by_user = true;
+                    state.browser_running = false;
+                    state.injected = false;
+                }
+                return Ok(TickOutcome::default());
+            }
+            Err(e) => return Err(e),
+        };
         {
             let mut state = self.state.lock().unwrap();
             state.browser_closed_by_user = false;

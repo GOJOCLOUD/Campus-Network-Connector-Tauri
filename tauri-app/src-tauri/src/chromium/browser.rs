@@ -394,6 +394,11 @@ pub struct ManagedBrowser {
     /// 上一次是我们起的那个浏览器**自己干净地退了**吗？
     /// （退出码 0 = 用户关掉了窗口，不是崩溃。）
     closed_by_user: std::sync::atomic::AtomicBool,
+    /// 用户自己关掉的窗口，要不要**自动**再弹一个（默认 false = 不自动弹）。
+    ///
+    /// 由协调器按产品口径下发。⚠️ 判定必须发生在**真正起浏览器之前**
+    /// （见 `ensure()` 里的注释）。
+    auto_reopen: std::sync::atomic::AtomicBool,
 }
 
 struct BrowserHandle {
@@ -413,6 +418,7 @@ impl ManagedBrowser {
             inner: Mutex::new(None),
             launch_failures: std::sync::atomic::AtomicU32::new(0),
             closed_by_user: std::sync::atomic::AtomicBool::new(false),
+            auto_reopen: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -518,6 +524,17 @@ impl ManagedBrowser {
             }
         }
 
+        // ⚠️ **这个判定必须放在起浏览器之前**（而不是只在 tick 开头看一次）：
+        //    tick 每 300ms 一轮，而浏览器的「进程退出」与 tick 之间有时间差
+        //    ⇒ 只在 tick 开头判会漏掉「刚好在那一轮之前关掉」的情况
+        //    ⇒ 2026-10-27 真机复验（Electron 线）就是这样又弹了一个。
+        //
+        //    走到这里时，attach + 扫进程已经花掉约 2 秒 ⇒ 退出状态**一定**已经读到了。
+        let auto_reopen = self.auto_reopen.load(std::sync::atomic::Ordering::Relaxed);
+        if !auto_reopen && self.closed_by_user() {
+            return Err("浏览器被用户关掉了（不自动重开）".into());
+        }
+
         // 真的没有 ⇒ 这才自己起一个。
         let failures = self.launch_failures.load(std::sync::atomic::Ordering::Relaxed);
         if failures >= MAX_LAUNCH_FAILURES {
@@ -563,6 +580,12 @@ impl ManagedBrowser {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         closed
+    }
+
+    /// 用户自己关掉的窗口，要不要**自动**再弹一个。
+    pub fn set_auto_reopen(&self, auto_reopen: bool) {
+        self.auto_reopen
+            .store(auto_reopen, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 用户点了「重新打开浏览器」⇒ 把「用户关的」这个状态清掉。
