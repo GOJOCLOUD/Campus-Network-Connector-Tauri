@@ -671,6 +671,33 @@ fn set_chromium_repair_enabled(app: &AppHandle, enabled: bool) -> Result<(), Str
     crate::chromium::repair::set_enabled(app, enabled)
 }
 
+/// 用户点了「重新打开浏览器」（Windows 线的「浏览器复制修复」用）。
+///
+/// 与 Electron 版 `chromiumRepair:reopenBrowser` 同语义。
+#[tauri::command]
+pub async fn reopen_feature_browser(
+    app: AppHandle,
+    prefix: String,
+) -> Result<serde_json::Value, String> {
+    if prefix == "chromiumRepair" {
+        return crate::chromium::repair::reopen_browser(&app).await;
+    }
+    Ok(serde_json::json!({ "action": "unsupported" }))
+}
+
+/// 用户自己关掉浏览器窗口之后，要不要自动重开。
+#[tauri::command]
+pub fn set_feature_auto_reopen(
+    app: AppHandle,
+    prefix: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    if prefix == "chromiumRepair" {
+        return Ok(crate::chromium::repair::set_auto_reopen(&app, enabled));
+    }
+    Ok(false)
+}
+
 /// 改**落盘状态**(下次启动仍生效)—— 与 Electron 版 `setFeatureEnabledSetting` 同语义。
 #[tauri::command]
 pub fn set_feature_enabled_setting(

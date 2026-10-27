@@ -14,6 +14,7 @@ export default function KeyboardPanel({
   featureList,
   featureStatus,
   onToggleFeature,
+  onReopenFeatureBrowser,
   showAccessibilityBadge,
   accessibilityTrusted,
   onOpenAccessibilitySettings,
@@ -51,7 +52,12 @@ export default function KeyboardPanel({
           </button>
         )}
       </div>
-      {<FeatureToggles featureList={featureList} featureStatus={featureStatus} onToggle={onToggleFeature} />}
+      {<FeatureToggles
+        featureList={featureList}
+        featureStatus={featureStatus}
+        onToggle={onToggleFeature}
+        onReopenFeatureBrowser={onReopenFeatureBrowser}
+      />}
       {/* ⌃D **抢没抢到**的提示:抢不到时必须说清楚,否则用户只会觉得
           「按了没反应」,还不知道是不是我们自己的问题。 */}
       {shortcutNotice && (

@@ -7,6 +7,7 @@ import KeyboardPanel from './panels/KeyboardPanel'
 import RenameDialog from './panels/RenameDialog'
 import UserAgreementDialog from './panels/UserAgreementDialog'
 import { USER_AGREEMENT_MD, TRIAL_SECONDS } from './lib/user-agreement'
+import { BUILD_FLAVOR } from './lib/build-info'
 
 // cnc API helper — maps to window.cnc IPC calls
 const cnc = window.cnc || {};
@@ -94,6 +95,14 @@ function App() {
     const timer = setInterval(load, 5000);
     return () => { alive = false; clearInterval(timer); };
   }, []);
+
+  // 用户点了「重新打开浏览器」（Windows 线的「浏览器复制修复」）。
+  const reopenFeatureBrowser = async (prefix) => {
+    try {
+      await cnc.reopenFeatureBrowser?.(prefix);
+    } catch (_) {}
+    setTimeout(refreshFeatures, 600);
+  };
 
   const toggleFeature = async (prefix, next) => {
     try {
@@ -615,6 +624,7 @@ function App() {
     featureList,
     featureStatus,
     onToggleFeature: toggleFeature,
+    onReopenFeatureBrowser: reopenFeatureBrowser,
     // 「辅助功能」授权状态:不做成占一整条的大横幅,只在第 4 页放一个小问号
     // (红=还不能用,绿=可以用),点一下直接跳到系统设置。
     // **只有 macOS 有「辅助功能」这回事**(Windows 的 SendInput 不需要授权),
@@ -653,6 +663,17 @@ function App() {
       className="app-drag relative h-screen bg-transparent flex flex-col overflow-hidden pt-10 px-2 pb-2"
       data-tauri-drag-region="deep"
     >
+      {/* 版本徽标：**Electron 版 / Tauri 版**。
+          两个 Windows 正式版本并存(界面一样、功能一样),窗口又是自绘的
+          (Windows 上没有原生标题栏)⇒ 光看窗口分不出来
+          ⇒ 顶部常驻一个小标签,用户一眼知道自己在测哪一个。
+          (2026-10-27 用户口径:「你根本就没有区分,让我测试」。)
+          只在 Windows 上显示(mac 的窗口有原生标题栏,本来就分得清)。 */}
+      {!isMac && (
+        <div className="absolute left-3 top-2 text-[11px] leading-none text-gray-400 select-none pointer-events-none">
+          {BUILD_FLAVOR}
+        </div>
+      )}
       {nativeStatus && nativeStatus.ok === false && (
         <div className="fixed top-0 left-0 right-0 z-50 bg-red-600 text-white text-sm px-4 py-2 shadow">
           模拟输入相关功能不可用：原生模块加载失败（{nativeStatus.error || '未知原因'}）。

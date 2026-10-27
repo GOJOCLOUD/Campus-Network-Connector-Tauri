@@ -59,6 +59,15 @@ const LAUNCH_TIMEOUT_MS: u64 = 30_000;
 /// 问一次 `/json/version` 给多少时间（毫秒）—— 浏览器已经在了就不该久等。
 const PROBE_TIMEOUT_MS: u64 = 5_000;
 
+/// 连「**已经在跑的**浏览器」时等端口的时限（毫秒）。
+///
+/// 端口没开就是没开 ⇒ 别白等。早先一律等 5 秒 ⇒ 每个候选端口白白耗掉 5 秒，
+/// 用户看到的是「半分钟才动一下」。
+const ATTACH_TIMEOUT_MS: u64 = 800;
+
+/// 连续几次起不来浏览器就到上限，不再重试。
+const MAX_LAUNCH_FAILURES: u32 = 3;
+
 /// 找一台没人占用的本地端口。
 fn find_free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -101,7 +110,7 @@ fn remember_port(profile_dir: &Path, port: u16) {
 /// 最后一道兜底：前两种办法都拿不到时，至少**别再去起一个「转发启动」的**
 /// （起了等于白起，还把「找回上次那个」的路堵死）。
 /// profile 路径经**环境变量**传进去（命令行里有中文/空格时引号不可靠）。
-fn find_running_ports(profile_dir: &Path) -> Vec<u16> {
+fn find_running_ports_blocking(profile_dir: &Path) -> Vec<u16> {
     let script = r#"
 $p = $env:CR_PROFILE
 Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
@@ -130,6 +139,21 @@ Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
         }
     }
     ports
+}
+
+/// 异步版：扫进程列表**不能**在 async 函数里同步做。
+///
+/// 早先直接在 `ensure()` 里调 `Command::output()` —— 那是**同步阻塞**的，
+/// 会把 Tokio 的工作线程卡住最多 15 秒 ⇒ 整个异步运行时卡住
+/// （界面不刷新、CDP 事件不处理）⇒ 整个软件像死了。
+/// （2026-10-27 真机踩过；Electron 线那边是同样的 `execFileSync` 坑。）
+///
+/// ⚠️ 用 `spawn_blocking` 而不是 `tokio::process`：tokio 没开 "process" 特性，
+///    加特性要重生成 Cargo.lock（本机没 cargo 编不了）⇒ 保持依赖不动。
+async fn find_running_ports(profile_dir: PathBuf) -> Vec<u16> {
+    tokio::task::spawn_blocking(move || find_running_ports_blocking(&profile_dir))
+        .await
+        .unwrap_or_default()
 }
 
 /// 把 `%VAR%` 展开成真实路径。
@@ -365,6 +389,11 @@ fn describe_process(child: &mut Child) -> String {
 pub struct ManagedBrowser {
     profile_dir: PathBuf,
     inner: Mutex<Option<BrowserHandle>>,
+    /// 连续几次起不来浏览器（到 `MAX_LAUNCH_FAILURES` 就不再重试）。
+    launch_failures: std::sync::atomic::AtomicU32,
+    /// 上一次是我们起的那个浏览器**自己干净地退了**吗？
+    /// （退出码 0 = 用户关掉了窗口，不是崩溃。）
+    closed_by_user: std::sync::atomic::AtomicBool,
 }
 
 struct BrowserHandle {
@@ -382,6 +411,8 @@ impl ManagedBrowser {
         ManagedBrowser {
             profile_dir,
             inner: Mutex::new(None),
+            launch_failures: std::sync::atomic::AtomicU32::new(0),
+            closed_by_user: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -403,6 +434,19 @@ impl ManagedBrowser {
         // 而且**可能还是我们起的**（那台是我们打开给用户用的）。
         // ⇒ 重新连上**同一个**浏览器时，要把这个归属接回去，
         //    否则退出时我们就不去关它了（它是我们开的嘛）。
+        // 先看一眼我们起的那个浏览器进程：是不是**干净地**退了。
+        // 退出码 0 = 用户自己关掉了窗口；非 0 = 崩了/被杀了。
+        // 区分得出来，才能「用户关的不再弹给他看，崩了的才自动恢复」。
+        let mut closed_by_user = false;
+        if let Some(old) = guard.as_ref() {
+            if let Some(child) = old.child.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    closed_by_user = status.code() == Some(0);
+                }
+            }
+        }
+        self.closed_by_user.store(closed_by_user, std::sync::atomic::Ordering::Relaxed);
+
         let mut previous = guard.take();
         let (prev_port, prev_started, mut prev_child) = match previous.as_mut() {
             Some(old) => {
@@ -435,7 +479,7 @@ impl ManagedBrowser {
             }
         }
         for port in candidates {
-            if let Some(client) = attach_to_port(&self.profile_dir, port).await {
+            if let Some(client) = attach_to_port(&self.profile_dir, port, ATTACH_TIMEOUT_MS).await {
                 let label = "浏览器".to_string();
                 remember_port(&self.profile_dir, port);
                 let (started_by_us, child) = if prev_port == port {
@@ -454,8 +498,8 @@ impl ManagedBrowser {
             }
         }
         // 扫进程命令行：可能扫出多个（其中一个是刚转发出去的、端口没真开）⇒ 逐个试
-        for port in find_running_ports(&self.profile_dir) {
-            if let Some(client) = attach_to_port(&self.profile_dir, port).await {
+        for port in find_running_ports(self.profile_dir.clone()).await {
+            if let Some(client) = attach_to_port(&self.profile_dir, port, ATTACH_TIMEOUT_MS).await {
                 let label = "浏览器".to_string();
                 remember_port(&self.profile_dir, port);
                 let (started_by_us, child) = if prev_port == port {
@@ -475,8 +519,29 @@ impl ManagedBrowser {
         }
 
         // 真的没有 ⇒ 这才自己起一个。
+        let failures = self.launch_failures.load(std::sync::atomic::Ordering::Relaxed);
+        if failures >= MAX_LAUNCH_FAILURES {
+            return Err(format!(
+                "连续 {} 次起不来浏览器，已停止重试",
+                failures
+            ));
+        }
         self.launch(&mut guard, prev_port, prev_started, prev_child)
             .await
+    }
+
+    /// 上一次是我们起的那个浏览器**被用户关掉了窗口**吗？
+    ///
+    /// 退出码 0 = 用户关掉了窗口（不是崩溃）。区分得出来，
+    /// 才能「用户关的不再弹给他看，崩了的才自动恢复」。
+    pub async fn closed_by_user(&self) -> bool {
+        self.closed_by_user.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 用户点了「重新打开浏览器」⇒ 把「用户关的」这个状态清掉。
+    pub fn clear_closed_by_user(&self) {
+        self.closed_by_user
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 浏览器还在吗（连接没断）。
@@ -575,11 +640,11 @@ impl ManagedBrowser {
             Err(e) => {
                 // 我们起的这个进程可能只是「转发」给了一个**已经在跑**的浏览器
                 // （同 profile 的单例行为）⇒ 真正在服务的那个才是我们要连的。
-                for running in find_running_ports(&self.profile_dir) {
+                for running in find_running_ports(self.profile_dir.clone()).await {
                     if running == port {
                         continue;
                     }
-                    if let Some(client) = attach_to_port(&self.profile_dir, running).await {
+                    if let Some(client) = attach_to_port(&self.profile_dir, running, 2000).await {
                         let label = "浏览器".to_string();
                         remember_port(&self.profile_dir, running);
                         let (started_by_us, child) = if prev_port == running {
@@ -599,10 +664,15 @@ impl ManagedBrowser {
                 }
                 let process = describe_process(&mut child);
                 let _ = child.kill();
+                let failures = self
+                    .launch_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
                 return Err(format!(
-                    "{}；{}；stderr 尾部: {}；{}",
+                    "{}；{}；连续第 {} 次起不来；stderr 尾部: {}；{}",
                     e,
                     process,
+                    failures,
                     tail_of(&stderr_path, 2000),
                     describe_profile_dir(&self.profile_dir)
                 ));
@@ -618,6 +688,10 @@ impl ManagedBrowser {
         // 记住端口 ⇒ 下次连不上时能找回**这个**浏览器
         // （Chromium 自己写的 DevToolsActivePort 会被「转发启动」的进程删掉）。
         remember_port(&self.profile_dir, port);
+        self.launch_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.closed_by_user
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         *guard = Some(BrowserHandle {
             client: client.clone(),
@@ -662,8 +736,12 @@ impl ManagedBrowser {
 /// 为什么要「按端口连」而不是只认 `DevToolsActivePort` 那个文件：
 /// 同 profile 的第二个浏览器（转发启动）退出时会把那个文件**删掉**
 /// ⇒ 那一路会整个失效。我们自己记的端口 + 扫进程命令行才是兜底。
-async fn attach_to_port(profile_dir: &Path, port: u16) -> Option<Arc<CdpClient>> {
-    let url = wait_for_endpoint(profile_dir, port, 5000).await.ok()?;
+async fn attach_to_port(
+    profile_dir: &Path,
+    port: u16,
+    timeout_ms: u64,
+) -> Option<Arc<CdpClient>> {
+    let url = wait_for_endpoint(profile_dir, port, timeout_ms).await.ok()?;
     match CdpClient::connect(&url).await {
         Ok(client) => Some(client),
         Err(_) => None,

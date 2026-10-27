@@ -47,7 +47,7 @@ const FRAME_BRIDGE_JS: &str = include_str!("../../resources/frame-bridge.js");
 
 /// 界面上的提示文案 —— 必须说**确实会发生**的事：
 /// 本软件会开一个自己的浏览器窗口，用户要在那个窗口里用。
-pub const HINT_ON: &str = "本软件已打开一个自己的 Edge 窗口 —— 请在这个窗口里上网、答题；关掉它后本软件会重新打开。首次使用需要扫码登录一次。";
+pub const HINT_ON: &str = "本软件已打开一个自己的 Edge 窗口 —— 请在这个窗口里上网、答题；关掉它之后本软件**不会**自动再开一个（下面有「重新打开浏览器」按钮）。首次使用需要扫码登录一次。";
 
 struct GlobalState {
     /// 开关（运行态）。
@@ -184,6 +184,11 @@ pub fn status(_app: &tauri::AppHandle) -> serde_json::Value {
         .map(|s| s.last_error.clone())
         .filter(|e| !e.is_empty())
         .unwrap_or(global_error);
+    let browser_closed_by_user = coordinator_status
+        .as_ref()
+        .map(|s| s.browser_closed_by_user)
+        .unwrap_or(false);
+    let auto_reopen = coordinator_status.as_ref().map(|s| s.auto_reopen).unwrap_or(true);
 
     json!({
         "enabled": enabled,
@@ -199,7 +204,36 @@ pub fn status(_app: &tauri::AppHandle) -> serde_json::Value {
         // 所以这里不暴露 safariRunning 那个字段（那是 mac 线的口径）。
         "hint": if enabled { HINT_ON } else { "" },
         "lastError": last_error,
+        // 浏览器**被用户关掉了** ⇒ 界面显示「重新打开浏览器」按钮，
+        // 而不是让软件偷偷再弹一个（2026-10-27 用户口径）。
+        "browserClosedByUser": browser_closed_by_user,
+        "autoReopen": auto_reopen,
     })
+}
+
+/// 用户点了「重新打开浏览器」⇒ 清掉状态并立刻起一个。
+pub async fn reopen_browser(_app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let coordinator = state().lock().unwrap().coordinator.clone();
+    match coordinator {
+        Some(coordinator) => {
+            let outcome = coordinator.reopen_browser().await?;
+            Ok(json!({
+                "tabs": outcome.tabs,
+                "mapped": outcome.mapped,
+                "errors": outcome.errors,
+            }))
+        }
+        None => Err("浏览器复制修复还没准备好（读不到字形参考库？）".to_string()),
+    }
+}
+
+/// 用户自己关掉浏览器窗口之后，要不要自动重开。
+pub fn set_auto_reopen(_app: &tauri::AppHandle, auto_reopen: bool) -> bool {
+    let coordinator = state().lock().unwrap().coordinator.clone();
+    match coordinator {
+        Some(coordinator) => coordinator.set_auto_reopen(auto_reopen),
+        None => auto_reopen,
+    }
 }
 
 /// 逐个作用域的映射结果（诊断用）。

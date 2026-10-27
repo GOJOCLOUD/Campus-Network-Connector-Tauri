@@ -69,6 +69,10 @@ pub struct CoordinatorStatus {
     pub ticks: u64,
     pub injections: u64,
     pub last_error: String,
+    /// 浏览器**被用户关掉了**（⇒ 界面要说清楚，而不是装作还在跑）。
+    pub browser_closed_by_user: bool,
+    /// 用户自己关掉窗口之后，要不要自动重开。
+    pub auto_reopen: bool,
 }
 
 /// 每个标签的「本轮记要」。
@@ -97,6 +101,10 @@ struct CoordState {
     /// 浏览器在不在跑（每轮更新一次，状态查询是同步的）。
     browser_running: bool,
     browser_label: String,
+    /// 浏览器被用户关掉了窗口（退出码 0）。
+    browser_closed_by_user: bool,
+    /// 用户自己关掉窗口之后要不要自动重开（默认 true）。
+    auto_reopen: bool,
 }
 
 /// 注入协调器。
@@ -127,7 +135,16 @@ impl Coordinator {
             matcher,
             injection_source,
             bridge_cell: tokio::sync::Mutex::new(None),
-            state: std::sync::Mutex::new(CoordState::default()),
+            state: std::sync::Mutex::new(CoordState {
+                // 默认**不自动重开**：用户自己关掉的浏览器窗口不再自动弹一个
+                // （2026-10-27 用户口径：「反反复复拉起浏览器」）⇒ 界面给一个
+                // 「重新打开浏览器」按钮。**崩溃/被强杀仍然自动恢复**
+                // （那不是「用户关的」，退出码非 0）。
+                //
+                // ⚠️ 想改回「关掉也自动重开」：把这里改成 true 就行。
+                auto_reopen: false,
+                ..CoordState::default()
+            }),
         });
         let main = coordinator.clone();
         tauri::async_runtime::spawn(async move { main.main_loop().await });
@@ -152,6 +169,33 @@ impl Coordinator {
 
     pub fn is_enabled(&self) -> bool {
         self.state.lock().unwrap().enabled
+    }
+
+    /// 用户自己关掉了浏览器窗口之后，要不要**自动**再开一个。
+    ///
+    /// true = 自动重开；false = 不自动重开，由界面给一个「重新打开」按钮。
+    pub fn set_auto_reopen(&self, auto_reopen: bool) -> bool {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.auto_reopen = auto_reopen;
+            if auto_reopen {
+                state.browser_closed_by_user = false;
+            }
+        }
+        if auto_reopen {
+            self.browser.clear_closed_by_user();
+        }
+        auto_reopen
+    }
+
+    /// 用户点了「重新打开浏览器」⇒ 清掉状态并立刻起一个。
+    pub async fn reopen_browser(&self) -> Result<TickOutcome, String> {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.browser_closed_by_user = false;
+        }
+        self.browser.clear_closed_by_user();
+        self.tick().await
     }
 
     /// 确保浏览器在跑、CDP 连着；返回 bridge。
@@ -237,7 +281,24 @@ impl Coordinator {
             let mut state = self.state.lock().unwrap();
             state.ticks += 1;
         }
+        // 用户自己关掉了那个浏览器窗口 ⇒ **不要**再偷偷弹一个给他
+        // （2026-10-27 用户口径：「反反复复拉起浏览器」）。
+        // 界面会显示「浏览器已关闭」+ 一个「重新打开」按钮。
+        let auto_reopen = self.state.lock().unwrap().auto_reopen;
+        if !auto_reopen && self.browser.closed_by_user().await {
+            {
+                let mut state = self.state.lock().unwrap();
+                state.browser_closed_by_user = true;
+                state.browser_running = false;
+                state.injected = false;
+            }
+            return Ok(TickOutcome::default());
+        }
         let bridge = self.ensure_bridge().await?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.browser_closed_by_user = false;
+        }
         {
             let running = self.browser.is_running().await;
             let label = self.browser.browser_label().await;
@@ -404,6 +465,8 @@ impl Coordinator {
             ticks: state.ticks,
             injections: state.injections,
             last_error: state.last_error.clone(),
+            browser_closed_by_user: state.browser_closed_by_user,
+            auto_reopen: state.auto_reopen,
         }
     }
 

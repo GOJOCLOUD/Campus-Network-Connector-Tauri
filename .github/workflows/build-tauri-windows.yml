@@ -84,6 +84,9 @@ jobs:
         working-directory: tauri-app/src-tauri
         run: cargo test --test cdp_browser_recovery -- --nocapture
 
+      - name: build flavor gate
+        run: node --test tools/verify/verify-build-flavor.cjs
+
       # 硬门禁:共享代码的一条不变量(跑不过就不发包)。
       #
       # 字形渲染的**栅格尺寸**必须与参考字形库一致 ——

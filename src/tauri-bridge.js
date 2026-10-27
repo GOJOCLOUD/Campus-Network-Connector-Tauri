@@ -488,6 +488,9 @@ function installTauriBridge() {
     setFeatureEnabled: (prefix, enabled) => invoke('set_feature_enabled', { prefix, enabled }),
     setFeatureEnabledSetting: (prefix, enabled) =>
       invoke('set_feature_enabled_setting', { prefix, enabled }),
+    // 「重新打开浏览器」—— Windows 线的「浏览器复制修复」用；
+    // 别的功能没有这个命令 ⇒ 调用会失败，前端 catch 掉即可。
+    reopenFeatureBrowser: (prefix) => invoke('reopen_feature_browser', { prefix }),
 
     // Safari 复制修复
     safariRepair: {

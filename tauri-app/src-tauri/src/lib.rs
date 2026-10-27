@@ -584,7 +584,7 @@ fn setup_tray(app: &tauri::AppHandle) {
 
     let built = TrayIconBuilder::new()
         .icon(icon)
-        .tooltip("模拟输入")
+        .tooltip("模拟输入（Tauri 版）")
         // 左键**不**弹菜单:左键直接把窗口叫回来(用户点它就是想"看到窗口")。
         // 右键仍然弹菜单(显示窗口 / 退出程序)。
         .show_menu_on_left_click(false)
@@ -704,6 +704,8 @@ pub fn run() {
             appcmd::get_feature_status,
             appcmd::set_feature_enabled,
             appcmd::set_feature_enabled_setting,
+            appcmd::reopen_feature_browser,
+            appcmd::set_feature_auto_reopen,
             appcmd::get_native_status,
             nativecmd::mouse_click,
             nativecmd::mouse_get_position,
