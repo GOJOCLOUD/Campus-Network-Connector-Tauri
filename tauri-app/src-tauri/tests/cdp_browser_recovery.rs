@@ -107,6 +107,61 @@ fn source_level_recovery_order_is_find_first_launch_last() {
     );
 }
 
+/// 「反反复复拉起浏览器」那六个坑的源码层断言（2026-10-27 真机带出来的）。
+#[test]
+fn source_level_no_more_relaunch_loop() {
+    let source = include_str!("../src/chromium/browser.rs");
+    let coord = include_str!("../src/chromium/coordinator.rs");
+
+    // ① 扫进程**不能**在 async 里同步做
+    //    （早先在 ensure() 里直接 Command::output() ⇒ 把 Tokio 工作线程卡住最多 15 秒）
+    assert!(
+        source.contains("async fn find_running_ports(profile_dir: PathBuf) -> Vec<u16>"),
+        "browser.rs 里的 find_running_ports 应该是异步的"
+    );
+    assert!(
+        source.contains("tokio::task::spawn_blocking"),
+        "browser.rs 缺少 spawn_blocking（扫进程不能同步阻塞 Tokio 工作线程）"
+    );
+    assert!(
+        source.contains("find_running_ports(self.profile_dir.clone()).await"),
+        "ensure() 里没有 await 异步版 find_running_ports"
+    );
+
+    // ② 连「已经在跑的浏览器」要快速失败
+    assert!(
+        source.contains("ATTACH_TIMEOUT_MS"),
+        "browser.rs 缺少 ATTACH_TIMEOUT_MS（连已经在跑的浏览器不该等 5 秒）"
+    );
+
+    // ③ 起不来要有上限
+    assert!(
+        source.contains("MAX_LAUNCH_FAILURES"),
+        "browser.rs 缺少 MAX_LAUNCH_FAILURES（起不来会无限重试）"
+    );
+
+    // ④ 退出码：0 = 用户关掉了窗口；非 0 = 崩了
+    //    （本机实测：Browser.close ⇒ code=0；Stop-Process -Force ⇒ code=4294967295）
+    assert!(
+        source.contains("status.code() == Some(0)"),
+        "browser.rs 里没有判「退出码 0 = 用户关掉了窗口」"
+    );
+    assert!(
+        source.contains("refresh_exit_state"),
+        "browser.rs 缺少 refresh_exit_state（判断之前要先刷新退出码）"
+    );
+    assert!(
+        coord.contains("refresh_exit_state"),
+        "coordinator.rs 判断「要不要重开」之前没有先刷新退出码"
+    );
+
+    // ⑤ 用户自己关掉的窗口不再自动弹一个
+    assert!(
+        coord.contains("auto_reopen"),
+        "coordinator.rs 缺少 auto_reopen（用户关掉的窗口不该自动再弹一个）"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnects_to_the_same_browser() {
     let profile_dir =
